@@ -1,0 +1,97 @@
+[package]
+name = "ambient-auction-listener"
+description = "API for listening for the Ambient Auction program"
+edition = "2021"
+authors = ["Engineering <engineering@ambientcrypto.ai"]
+version = "0.2.6"
+repository = "https://github.com/ambient-xyz/auction-listener"
+license = "Proprietary"
+homepage = "https://ambient.xyz"
+
+[package.metadata.deb]
+name = "ambient-auction-tools"
+maintainer = "Engineering <engineering@ambientcrypto.ai>"
+provides = "ambient-auction-tools"
+conflicts = "ambient-auction-tools"
+replaces = "ambient-auction-tools"
+assets = [
+    [
+        "target/release/run-auction",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "target/release/init-bundles",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "target/release/reclaim-requests",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "target/release/cancel-bundles",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "target/release/mock-server",
+        "usr/bin/",
+        "755",
+    ]
+]
+
+[[bin]]
+name = "fund-bidder"
+path = "src/bin/fund-bidder.rs"
+
+[[bin]]
+name = "reclaim-requests"
+path = "src/bin/reclaim-requests.rs"
+
+[dependencies]
+bytemuck = { version = "1.22.0", features = ["derive", "const_zeroed"] }
+num_enum = "0.7.3"
+solana-account-decoder-client-types = "=2.3.13"
+solana-client = "=2.3.13"
+solana-sdk = "=2.3.1"
+ambient-auction-api = { path = "../auction-api",features = ["serde"] }
+ambient-auction-client ={path = "../auction-client"}
+itertools = "0.14"
+tokio = "1.45.0"
+tokio-stream = "0.1"
+thiserror = "2"
+log = "0"
+futures-util = "0.3.31"
+xdg = "3"
+clap = { version = "4.5.36", features = ["derive"] }
+rand = "0.9.0"
+anyhow = "1.0.98"
+sha2 = "0.10.9"
+base64 = "0.22.1"
+reqwest-eventsource = "0.6.0"
+reqwest = { version = "0.12.15", default-features = false, features = ["json"] }
+axum = { version = "0.8.4", features = ["macros"] }
+serde = "1"
+serde_json = "1.0"
+env_logger = "0.11.8"
+yellowstone-grpc-client = "9.0.0"
+yellowstone-grpc-proto = "9.0.0"
+json = "0.12.4"
+tonic-health = "0.14.1"
+prometheus = "0.14.0"
+x25519-dalek = { version = "2.0.1", features = [
+    "serde",
+    "static_secrets",
+    "getrandom",
+] }
+wolf-crypto = "0.1.0-alpha.15"
+moka = { version = "0.12.10", features = ["future"] }
+sentry = { version = "0.42", features = ["tracing", "logs", "tower"] }
+sentry-tracing = "0.42"
+tracing = "0.1"
+tokenizer = { path = "../tokenizer" }
+solana-system-interface = { version = "1.0.0", features = ["bincode"] }
+lz4_flex = "0.11.5"
+papaya = "0.2.3"
