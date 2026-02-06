@@ -277,6 +277,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-api"
 version = "0.1.0"
+source = "git+https://github.com/ambient-xyz/auction-api#60ebbc1fbcd0b7e786cd16578f4fe80b6759e72c"
 dependencies = [
  "borsh 0.10.4",
  "bs58",
@@ -290,6 +291,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-client"
 version = "0.1.0"
+source = "git+https://github.com/ambient-xyz/auction-client#a6356d549f60e8e87e4f32fd5af05bfd0c7643a5"
 dependencies = [
  "ambient-auction-api",
  "lz4_flex",
@@ -614,6 +616,7 @@ dependencies = [
 [[package]]
 name = "async-threadpool"
 version = "0.2.6"
+source = "git+https://github.com/ambient-xyz/async-threadpool#3d7a67e753b7e6d56ed33a5b5532c3ac8b737e9f"
 dependencies = [
  "rayon",
  "thiserror 2.0.18",
@@ -7555,6 +7558,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tokenizer"
 version = "0.2.6"
+source = "git+https://github.com/ambient-xyz/tokenizer#15ad76360888bc8872f9097bd4b05ddfe17a1670"
 dependencies = [
  "async-threadpool",
  "minijinja",

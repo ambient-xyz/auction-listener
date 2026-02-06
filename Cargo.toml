@@ -56,8 +56,8 @@ num_enum = "0.7.3"
 solana-account-decoder-client-types = "=2.3.13"
 solana-client = "=2.3.13"
 solana-sdk = "=2.3.1"
-ambient-auction-api = { path = "../auction-api",features = ["serde"] }
-ambient-auction-client ={path = "../auction-client"}
+ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api",features = ["serde"] }
+ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client"}
 itertools = "0.14"
 tokio = "1.45.0"
 tokio-stream = "0.1"
@@ -91,7 +91,7 @@ moka = { version = "0.12.10", features = ["future"] }
 sentry = { version = "0.42", features = ["tracing", "logs", "tower"] }
 sentry-tracing = "0.42"
 tracing = "0.1"
-tokenizer = { path = "../tokenizer" }
+tokenizer = { git = "https://github.com/ambient-xyz/tokenizer" }
 solana-system-interface = { version = "1.0.0", features = ["bincode"] }
 lz4_flex = "0.11.5"
 papaya = "0.2.3"
