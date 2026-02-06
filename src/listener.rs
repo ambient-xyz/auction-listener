@@ -1430,6 +1430,7 @@ pub async fn run_auction_and_get_data(
     )
     .instrument(info_span!("glm_tokenizer"))
     .await? as u64;
+    tracing::info!(prompt_length = prompt_len, "Tokenized and calculated prompt length.");
 
     let balance = {
         let _timer = RPC_CLIENT_TIMINGS
