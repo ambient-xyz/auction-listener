@@ -819,6 +819,25 @@ pub async fn stream_completion(
     }
     let mut es = EventSource::new(request)?;
     es.set_retry_policy(Box::new(reqwest_eventsource::retry::Never));
+    // Get the first result from the stream, if it's an error
+    match es.next().await {
+        // this is the happy case, we continus as normal here.
+        Some(Ok(Event::Open)) => (),
+        Some(Err(e)) => {
+            tracing::error!(error = ?e, "Error in upstream completions endpoint.");
+            return Err(e.into());
+        }
+        Some(Ok(event)) => {
+            tracing::warn!(
+                event = ?event,
+                "BUG: Accidentally ate the first event from the upstream completions."
+            );
+        }
+        None => {
+            tracing::error!("Received no response from upstream completions.");
+            return Err(Error::InferenceChannel);
+        }
+    }
     Ok(es.filter_map(async move |event| match event {
         Ok(Event::Open) => None,
         Ok(Event::Message(event)) => {
