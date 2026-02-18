@@ -485,19 +485,19 @@ pub struct StreamingToolCall {
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(untagged)]
 pub enum ContentDelta {
-    Reasoning {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
-        #[serde(deserialize_with = "Option::deserialize")]
-        reasoning_content: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<StreamingToolCall>>,
-    },
     Output {
         #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
         #[serde(deserialize_with = "Option::deserialize")]
         content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<StreamingToolCall>>,
+    },
+    Reasoning {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        reasoning_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<StreamingToolCall>>,
     },
