@@ -229,8 +229,20 @@ async fn maintain_bundle_registry_cache(
             tracing::error!(error = %e, "Error subscribing to request bundles");
         })?;
 
-    while let Some(Ok(upd)) = stream.next().await {
-        let Some(UpdateOneof::Account(account)) = upd.update_oneof else {
+    while let Some(upd) = stream.next().await {
+        let update = match upd {
+            Ok(u) => u,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Yellowstone stream for bundle cache encountered an error."
+                );
+                return Err(crate::run::Error::Internal(format!(
+                    "Error in yellowstone subscription: {error}"
+                )));
+            }
+        };
+        let Some(UpdateOneof::Account(account)) = update.update_oneof else {
             continue;
         };
 
@@ -1201,20 +1213,18 @@ impl AuctionClient {
         new_bundle_lamports: u64,
         new_auction_lamports: u64,
     ) -> Result<(), Error> {
-        let ix = sdk::close_request(
-            ambient_auction_client::sdk::CloseRequest{
-               request_authority:              request_authority.pubkey(),
-                job_request_key,
-                bundle_payer,
-                bundle_key,
-                auction_key,
-                auction_payer,
-                context_length_tier,
-                expiry_duration_tier,
-                new_bundle_lamports,
-                new_auction_lamports,
-            }
-        );
+        let ix = sdk::close_request(ambient_auction_client::sdk::CloseRequest {
+            request_authority: request_authority.pubkey(),
+            job_request_key,
+            bundle_payer,
+            bundle_key,
+            auction_key,
+            auction_payer,
+            context_length_tier,
+            expiry_duration_tier,
+            new_bundle_lamports,
+            new_auction_lamports,
+        });
         let mut tx = Transaction::new_with_payer(&[ix], Some(&request_authority.pubkey()));
         tx.sign(&[request_authority], recent_blockhash);
         let sig = self
@@ -1430,7 +1440,10 @@ pub async fn run_auction_and_get_data(
     )
     .instrument(info_span!("glm_tokenizer"))
     .await? as u64;
-    tracing::info!(prompt_length = prompt_len, "Tokenized and calculated prompt length.");
+    tracing::info!(
+        prompt_length = prompt_len,
+        "Tokenized and calculated prompt length."
+    );
 
     let balance = {
         let _timer = RPC_CLIENT_TIMINGS
