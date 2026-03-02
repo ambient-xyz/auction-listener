@@ -1,11 +1,12 @@
 use crate::listener::AuctionClient;
+use crate::node_encryption;
 use crate::yellowstone_grpc::YellowstoneGrpcError;
 use ambient_auction_api::{Auction, Bid, BidStatus, JobRequest, RequestBundle, RequestTier};
 use axum::http::HeaderMap;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine as _;
+use base64::prelude::BASE64_STANDARD;
 use futures_util::StreamExt as _;
-use futures_util::{stream::BoxStream, Stream};
+use futures_util::{Stream, stream::BoxStream};
 use reqwest_eventsource::{CannotCloneRequestError, Event, EventSource};
 use serde::{Deserialize, Serialize};
 use solana_client::{client_error::ClientError, nonblocking::pubsub_client::PubsubClientError};
@@ -24,7 +25,7 @@ use thiserror::Error as ThisError;
 use tokenizer::ChatMessage;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::oneshot;
-use tracing::{info_span, instrument, Instrument as _};
+use tracing::{Instrument as _, info_span, instrument};
 use wolf_crypto::buf::Iv;
 use yellowstone_grpc_client::GeyserGrpcClientError;
 
@@ -298,11 +299,7 @@ pub struct InferenceArgs {
 
 impl InferenceArgs {
     pub fn max_lamports_per_output_token(&self) -> u64 {
-        if self.is_paid {
-            10
-        } else {
-            0
-        }
+        if self.is_paid { 10 } else { 0 }
     }
 }
 
@@ -528,6 +525,31 @@ impl ContentDelta {
                 shared_secret,
                 iv,
             )?)),
+            None => None,
+        };
+        Ok(())
+    }
+
+    pub fn decrypt(&mut self, shared_secret: [u8; 32], iv: Iv) -> Result<(), AuctionError> {
+        let ciphertext = match self {
+            ContentDelta::Reasoning {
+                reasoning_content: content,
+                ..
+            }
+            | ContentDelta::Output { content, .. } => content,
+            ContentDelta::ToolCall { .. } | ContentDelta::Finished {} => return Ok(()),
+        };
+        *ciphertext = match ciphertext {
+            Some(b64) => {
+                let bytes = BASE64_STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|_| AuctionError::new("base64 decode failed"))?;
+                let decrypted = encrypt_with_iv(&bytes, shared_secret, iv)?;
+                Some(
+                    String::from_utf8(decrypted)
+                        .map_err(|_| AuctionError::new("decrypted content is not valid UTF-8"))?,
+                )
+            }
             None => None,
         };
         Ok(())
@@ -800,19 +822,31 @@ pub async fn retry<T, E, Fut: Future + Send>(
 ///`data_ip` is the IP address provided by the winning bidder which will be used to perform the
 ///inference.
 ///`data_port` the port to send this inference request to
-#[instrument(skip(request), fields(job_request_id = request.request_id))]
+#[instrument(skip(request, node_encryption), fields(job_request_id = request.request_id))]
 pub async fn stream_completion(
     mut request: InferenceRequest,
     data_ip: IpAddr,
     data_port: u16,
+    node_encryption: Option<node_encryption::NodeEncryption>,
 ) -> Result<impl Stream<Item = Result<StreamingResponse, Error>>, Error> {
     tracing::debug!("Connecting to inference server using {data_ip}:{data_port}");
     request.args.stream = Some(true);
-    let mut request = HTTP_CLIENT
+
+    let enc_meta = node_encryption
+        .as_ref()
+        .map(|enc| enc.encrypt_request(&mut request.args.messages))
+        .transpose()?;
+
+    let mut http_req = HTTP_CLIENT
         .post(format!("http://{data_ip}:{data_port}/v1/chat/completions"))
         .header("Accept", "application/json")
-        .headers(tracing_headers())
-        .json(&request);
+        .headers(tracing_headers());
+
+    if let Some(ref meta) = enc_meta {
+        http_req = meta.apply_headers(http_req);
+    }
+
+    let mut request = http_req.json(&request);
     // If we have an env var set, we should use that token.
     if let Ok(token) = std::env::var("INFERENCE_TOKEN") {
         request = request.header("Authorization", format!("Bearer {token}"));
@@ -838,7 +872,7 @@ pub async fn stream_completion(
             return Err(Error::InferenceChannel);
         }
     }
-    Ok(es.filter_map(async move |event| match event {
+    let base_stream = es.filter_map(async move |event| match event {
         Ok(Event::Open) => None,
         Ok(Event::Message(event)) => {
             log::trace!("Event data: {}", &event.data);
@@ -875,7 +909,12 @@ pub async fn stream_completion(
             );
             Some(Err(e.into()))
         }
-    }))
+    });
+
+    match enc_meta {
+        Some(meta) => Ok(node_encryption::decrypt_stream(meta.shared_secret, base_stream).boxed()),
+        None => Ok(base_stream.boxed()),
+    }
 }
 
 ///A basic wrapper around OpenAI compatible `/v1/chat/completions` endpoints using `stream: false`
@@ -894,27 +933,40 @@ pub async fn stream_completion(
 ///`wait_for_verification`: whether to wait for verification or not. The specifics of how this is
 ///handled are determined by the endpoint. The *intent* is to prevent blocking while waiting for
 ///the job to be verified.
-#[instrument(skip(request))]
+#[instrument(skip(request, node_encryption))]
 pub async fn completion(
     mut request: InferenceRequest,
     data_ip: IpAddr,
     data_port: u16,
+    node_encryption: Option<node_encryption::NodeEncryption>,
 ) -> Result<Box<SyncResponse>, Error> {
     log::debug!("Connecting to inference server using {data_ip}:{data_port}");
     request.args.stream = Some(false);
     match &request.args.encrypt_with {
         Some(key) if *key != <[u8; 32]>::default() => {
-            log::warn!("BUG: Forcing encrypt_with field to `None`. We do not support one-shot encryption at the moment.")
+            log::warn!(
+                "BUG: Forcing encrypt_with field to `None`. We do not support one-shot encryption at the moment."
+            )
         }
         _ => {}
     }
     request.args.encrypt_with = None;
+
+    let enc_meta = node_encryption
+        .as_ref()
+        .map(|enc| enc.encrypt_request(&mut request.args.messages))
+        .transpose()?;
+
     let mut http_request = HTTP_CLIENT
         .post(format!("http://{data_ip}:{data_port}/v1/chat/completions"))
         .header("Accept", "application/json")
-        .headers(tracing_headers())
-        .json(&request);
-    // If we have an env var set, we should use that token.
+        .headers(tracing_headers());
+
+    if let Some(ref meta) = enc_meta {
+        http_request = meta.apply_headers(http_request);
+    }
+
+    let mut http_request = http_request.json(&request);
     if let Ok(token) = std::env::var("INFERENCE_TOKEN") {
         http_request = http_request.header("Authorization", format!("Bearer {token}"));
     }

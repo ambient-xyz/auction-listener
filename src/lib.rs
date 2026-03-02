@@ -2,6 +2,7 @@ use solana_sdk::pubkey::Pubkey;
 
 pub mod error;
 pub mod listener;
+pub mod node_encryption;
 pub mod run;
 pub mod yellowstone_grpc;
 

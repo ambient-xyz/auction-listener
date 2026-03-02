@@ -1,19 +1,20 @@
+use crate::node_encryption;
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::instruction::{SubmitJobOutputArgs, SubmitValidationArgs};
 use ambient_auction_api::{
-    error::AuctionError, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
-    JobVerificationState, Metadata, RequestTier, PUBKEY_BYTES,
+    Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus, JobVerificationState, Metadata,
+    PUBKEY_BYTES, RequestTier, error::AuctionError,
 };
+use ambient_auction_api::{BUNDLE_REGISTRY_SEED, BundleStatus};
 use ambient_auction_api::{BundleRegistry, RevealBidArgs};
-use ambient_auction_api::{BundleStatus, BUNDLE_REGISTRY_SEED};
 use ambient_auction_client::ID as AUCTION_PROGRAM;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytemuck::Pod;
 use futures_util::SinkExt as _;
 use futures_util::{Stream, StreamExt};
-use prometheus::register_gauge;
 use prometheus::Gauge;
+use prometheus::register_gauge;
 use rand::distr::SampleString as _;
 use sha2::{Digest, Sha256};
 use solana_account_decoder_client_types::UiAccountEncoding;
@@ -26,8 +27,8 @@ use solana_client::{
 };
 use solana_sdk::commitment_config::CommitmentLevel;
 use solana_sdk::hash::Hash;
-use solana_sdk::message::v0::Message;
 use solana_sdk::message::VersionedMessage;
+use solana_sdk::message::v0::Message;
 use solana_sdk::signature::Signature;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::{
@@ -49,7 +50,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug_span, info_span, instrument, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug_span, info_span, instrument};
 use wolf_crypto::buf::Iv;
 use x25519_dalek::{PublicKey, StaticSecret};
 use yellowstone_grpc_client::{GeyserGrpcClient, Interceptor};
@@ -73,13 +74,13 @@ use ambient_auction_client::sdk;
 
 use crate::error::Error::Custom;
 use crate::run::{
-    completion, encrypt_with_iv, retry, stream_completion, wait_for_verification, InferenceRequest,
-    InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse, SubmitJobArgs,
+    InferenceRequest, InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse,
+    SubmitJobArgs, completion, encrypt_with_iv, retry, stream_completion, wait_for_verification,
 };
-use crate::yellowstone_grpc::{decode_account_info, CloneableGeyserGrpcClient};
+use crate::yellowstone_grpc::{CloneableGeyserGrpcClient, decode_account_info};
 use crate::{error::Error, run};
 use ambient_auction_client::sdk::request_job;
-use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use solana_sdk::pubkey::MAX_SEED_LEN;
 use std::sync::LazyLock;
 
@@ -1201,20 +1202,18 @@ impl AuctionClient {
         new_bundle_lamports: u64,
         new_auction_lamports: u64,
     ) -> Result<(), Error> {
-        let ix = sdk::close_request(
-            ambient_auction_client::sdk::CloseRequest{
-               request_authority:              request_authority.pubkey(),
-                job_request_key,
-                bundle_payer,
-                bundle_key,
-                auction_key,
-                auction_payer,
-                context_length_tier,
-                expiry_duration_tier,
-                new_bundle_lamports,
-                new_auction_lamports,
-            }
-        );
+        let ix = sdk::close_request(ambient_auction_client::sdk::CloseRequest {
+            request_authority: request_authority.pubkey(),
+            job_request_key,
+            bundle_payer,
+            bundle_key,
+            auction_key,
+            auction_payer,
+            context_length_tier,
+            expiry_duration_tier,
+            new_bundle_lamports,
+            new_auction_lamports,
+        });
         let mut tx = Transaction::new_with_payer(&[ix], Some(&request_authority.pubkey()));
         tx.sign(&[request_authority], recent_blockhash);
         let sig = self
@@ -1430,7 +1429,10 @@ pub async fn run_auction_and_get_data(
     )
     .instrument(info_span!("glm_tokenizer"))
     .await? as u64;
-    tracing::info!(prompt_length = prompt_len, "Tokenized and calculated prompt length.");
+    tracing::info!(
+        prompt_length = prompt_len,
+        "Tokenized and calculated prompt length."
+    );
 
     let balance = {
         let _timer = RPC_CLIENT_TIMINGS
@@ -1983,8 +1985,13 @@ pub async fn submit_job_async<'a>(
                 let _ = tx.send(
                     Ok(StreamingResponse::lifecycle(LifecycleEvent::RequestForwarded(data_ip, data_port)))
                 );
+                let node_encryption = node_encryption::discover(
+                    self_private_key,
+                    data_ip,
+                    data_port,
+                ).await;
                 let mut stream =
-                    Box::pin(stream_completion(inference_request, data_ip, data_port).await?);
+                    Box::pin(stream_completion(inference_request, data_ip, data_port, node_encryption).await?);
 
                 // TODO(nap) count tokens here and _always_ report on-chain
                 // Forward all events from the stream to the channel
@@ -2068,7 +2075,10 @@ async fn submit_job_sync<'a>(
                     expiry_duration_tier,
                 ));
             }
-            let mut out = completion(inference_request, data_ip, data_port).await?;
+            let node_encryption =
+                node_encryption::discover(self_private_key, data_ip, data_port).await;
+            let mut out =
+                completion(inference_request, data_ip, data_port, node_encryption).await?;
             out.winning_bidder = Some(winning_bidder);
             out.winning_bid_price = winning_bid_price;
 

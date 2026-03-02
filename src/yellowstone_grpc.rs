@@ -4,9 +4,9 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use yellowstone_grpc_client::{GeyserGrpcBuilderError, GeyserGrpcClient, GeyserGrpcClientError};
 use yellowstone_grpc_proto::geyser::{
-    subscribe_request_filter_accounts_filter::Filter, subscribe_update::UpdateOneof::Account,
     SubscribeRequestFilterAccounts, SubscribeRequestFilterAccountsFilter,
-    SubscribeUpdateAccountInfo,
+    SubscribeUpdateAccountInfo, subscribe_request_filter_accounts_filter::Filter,
+    subscribe_update::UpdateOneof::Account,
 };
 
 #[derive(Debug, thiserror::Error)]
