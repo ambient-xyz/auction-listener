@@ -675,6 +675,7 @@ pub struct ToolCall {
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SyncMessage {
     pub role: String,
+    #[serde(alias = "reasoning")]
     pub reasoning_content: Option<String>,
     pub content: Option<String>,
     pub refusal: Option<String>,
