@@ -155,17 +155,22 @@ async fn completions_handler(
     let error = random_error(args.error_rate, is_streaming);
 
     if let Some(kind) = error {
-        if !matches!(kind, ErrorKind::MidStreamErrorEvent | ErrorKind::MidStreamDrop) {
+        if !matches!(
+            kind,
+            ErrorKind::MidStreamErrorEvent | ErrorKind::MidStreamDrop
+        ) {
             return Ok(make_http_error_response(kind));
         }
     }
 
     match request.stream {
-        Some(true) => Ok(
-            streaming_handler(request, args.tps, args.min_delay, args.max_delay, error)
-                .await
-                .into_response(),
-        ),
+        Some(true) => {
+            Ok(
+                streaming_handler(request, args.tps, args.min_delay, args.max_delay, error)
+                    .await
+                    .into_response(),
+            )
+        }
         _ => Ok(Json(sync_handler(args.min_delay, args.max_delay).await).into_response()),
     }
 }
@@ -202,7 +207,7 @@ async fn sync_handler(min_delay: u64, max_delay: u64) -> SyncResponse {
             message: SyncMessage {
                 role: "assistant".to_string(),
                 content: Some("This is a complete response from the mock server.".to_string()),
-                reasoning_content: None,
+                reasoning_content: Some("This is some reasoning content".to_string()),
                 refusal: None,
                 annotations: None,
                 audio: None,
@@ -238,6 +243,7 @@ fn generate_streaming_messages(
     error: Option<ErrorKind>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     use futures_util::stream::{self, StreamExt};
+    let thinking_tokens = total_tokens / 3;
 
     let words = vec![
         "Hello",
@@ -281,14 +287,26 @@ fn generate_streaming_messages(
             model: "z-ai/glm-4.6".into(),
             choices: vec![ContentChoice {
                 index: 0,
-                delta: ContentDelta::Output {
-                    role: if i == 0 {
-                        Some("assistant".to_string())
-                    } else {
-                        None
-                    },
-                    content: Some(content),
-                    tool_calls: None,
+                delta: if i > thinking_tokens {
+                    ContentDelta::Output {
+                        role: if i == 0 {
+                            Some("assistant".to_string())
+                        } else {
+                            None
+                        },
+                        content: Some(content),
+                        tool_calls: None,
+                    }
+                } else {
+                    ContentDelta::Reasoning {
+                        role: if i == 0 {
+                            Some("assistant".to_string())
+                        } else {
+                            None
+                        },
+                        reasoning_content: Some(content),
+                        tool_calls: None,
+                    }
                 },
                 logprobs: None,
                 finish_reason: if is_last {
@@ -324,20 +342,18 @@ fn generate_streaming_messages(
         }
         _ => {
             // Normal completion: usage event then [DONE]
-            let usage_event =
-                StreamingResponse::Usage(ambient_auction_listener::run::Usage {
-                    id: request_id.clone(),
-                    object: "chat.completion.usage".to_string(),
-                    merkle_root:
-                        "1018ffbd513a6b5a5fe77dce4b47989c3d5b56d7cf3c00f3523dc3d2ea5cb21d"
-                            .to_string(),
-                    usage: UsageInfo {
-                        prompt_tokens: 12,
-                        completion_tokens: total_tokens,
-                        total_tokens: 12 + total_tokens,
-                        prompt_tokens_details: None,
-                    },
-                });
+            let usage_event = StreamingResponse::Usage(ambient_auction_listener::run::Usage {
+                id: request_id.clone(),
+                object: "chat.completion.usage".to_string(),
+                merkle_root: "1018ffbd513a6b5a5fe77dce4b47989c3d5b56d7cf3c00f3523dc3d2ea5cb21d"
+                    .to_string(),
+                usage: UsageInfo {
+                    prompt_tokens: 12,
+                    completion_tokens: total_tokens,
+                    total_tokens: 12 + total_tokens,
+                    prompt_tokens_details: None,
+                },
+            });
             events.push(Ok(Event::default().json_data(&usage_event).unwrap()));
             events.push(Ok(Event::default().data("[DONE]")));
         }
