@@ -851,7 +851,10 @@ pub async fn stream_completion(
                     &event.data,
                 ) {
                     Ok(FallibleResponse::Ok(resp)) => Some(Ok(resp)),
-                    Ok(FallibleResponse::Err(e)) => Some(Err(Error::Internal(e.error))),
+                    Ok(FallibleResponse::Err(e)) => {
+                        tracing::error!(error = %e.error, "Upstream completions stream returned error");
+                        Some(Err(Error::Internal("Error calling completions endpoint".to_owned())))
+                    }
                     Err(e) => {
                         tracing::error!(
                             "Unable to decode response from inference host: {e}. Response: {}",
@@ -927,9 +930,12 @@ pub async fn completion(
         .inspect_err(|e| tracing::error!(error = ?e, data_ip = ?data_ip, data_port, "Error in completions endpoint"))?;
     match resp {
         FallibleResponse::Ok(resp) => Ok(resp),
-        FallibleResponse::Err(_) => Err(Error::Internal(
-            "Error calling completions endpoint.".to_string(),
-        )),
+        FallibleResponse::Err(e) => {
+            tracing::error!(error = %e.error, %data_ip, data_port, "Upstream completions endpoint returned error");
+            Err(Error::Internal(
+                "Error calling completions endpoint".to_owned(),
+            ))
+        }
     }
 }
 
