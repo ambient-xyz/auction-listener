@@ -24,6 +24,7 @@ use solana_client::{
     rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
     rpc_filter::RpcFilterType,
 };
+use solana_sdk::clock::MAX_RECENT_BLOCKHASHES;
 use solana_sdk::commitment_config::CommitmentLevel;
 use solana_sdk::hash::Hash;
 use solana_sdk::message::v0::Message;
@@ -47,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug_span, info_span, instrument, Instrument as _, Span};
@@ -58,7 +60,8 @@ use yellowstone_grpc_proto::geyser::subscribe_request_filter_accounts_filter_mem
 use yellowstone_grpc_proto::geyser::subscribe_update::UpdateOneof;
 use yellowstone_grpc_proto::geyser::{
     CommitmentLevel as GrpcCommitmentLevel, SubscribeRequestFilterAccountsFilter,
-    SubscribeRequestFilterAccountsFilterMemcmp, SubscribeUpdate,
+    SubscribeRequestFilterAccountsFilterMemcmp, SubscribeRequestFilterBlocksMeta, SubscribeUpdate,
+    SubscribeUpdateBlockMeta,
 };
 use yellowstone_grpc_proto::geyser::{SubscribeRequest, SubscribeRequestFilterAccounts};
 use yellowstone_grpc_proto::geyser::{
@@ -165,6 +168,64 @@ impl Drop for GaugeHandle {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedRecentBlockhash {
+    slot: u64,
+    blockhash: Hash,
+    block_height: Option<u64>,
+    last_valid_block_height: Option<u64>,
+}
+
+fn cached_blockhash_from_block_meta(
+    block: &SubscribeUpdateBlockMeta,
+) -> Result<CachedRecentBlockhash, String> {
+    let block_height = block.block_height.as_ref().map(|value| value.block_height);
+    Ok(CachedRecentBlockhash {
+        slot: block.slot,
+        blockhash: block
+            .blockhash
+            .parse()
+            .map_err(|e| format!("Failed to parse blockhash `{}`: {e}", block.blockhash))?,
+        block_height,
+        last_valid_block_height: block_height
+            .and_then(|height| height.checked_add(MAX_RECENT_BLOCKHASHES as u64)),
+    })
+}
+
+fn should_replace_cached(
+    current: Option<&CachedRecentBlockhash>,
+    next: &CachedRecentBlockhash,
+) -> bool {
+    match current {
+        Some(current) => next.slot > current.slot,
+        None => true,
+    }
+}
+
+async fn wait_for_cached_blockhash(
+    mut rx: watch::Receiver<Option<CachedRecentBlockhash>>,
+    timeout_duration: Duration,
+) -> Option<CachedRecentBlockhash> {
+    if let Some(cached) = rx.borrow().clone() {
+        return Some(cached);
+    }
+
+    timeout(timeout_duration, async move {
+        loop {
+            if rx.changed().await.is_err() {
+                return None;
+            }
+
+            if let Some(cached) = rx.borrow().clone() {
+                return Some(cached);
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 pub struct AuctionClient {
     pub program_id: Pubkey,
     pub rpc_client: RpcClient,
@@ -174,6 +235,8 @@ pub struct AuctionClient {
     // Yellowstone gRPC client: access with self.yellowstone_client()
     yellowstone_client: CloneableGeyserGrpcClient,
     bundle_registry_cache: Arc<papaya::HashMap<Pubkey, BundleRegistry>>,
+    recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
+    recent_blockhash_rx: watch::Receiver<Option<CachedRecentBlockhash>>,
 }
 impl std::fmt::Debug for AuctionClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -264,6 +327,81 @@ async fn maintain_bundle_registry_cache(
     Ok(())
 }
 
+async fn maintain_recent_blockhash_cache(
+    mut geyser: CloneableGeyserGrpcClient,
+    recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
+) -> Result<(), crate::run::Error> {
+    tracing::info!("Starting recent blockhash cache subscription.");
+    let (_, mut stream) = geyser
+        .0
+        .subscribe_with_request(Some(SubscribeRequest {
+            blocks_meta: HashMap::from([(
+                "listener-recent-blockhash".to_string(),
+                SubscribeRequestFilterBlocksMeta {},
+            )]),
+            commitment: Some(GrpcCommitmentLevel::Processed.into()),
+            ..Default::default()
+        }))
+        .await
+        .inspect_err(|e| {
+            tracing::error!(error = %e, "Error subscribing to block meta updates");
+        })?;
+
+    while let Some(upd) = stream.next().await {
+        let update = match upd {
+            Ok(u) => u,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Yellowstone stream for recent blockhash cache encountered an error."
+                );
+                return Err(crate::run::Error::Internal(format!(
+                    "Error in yellowstone block meta subscription: {error}"
+                )));
+            }
+        };
+
+        let Some(UpdateOneof::BlockMeta(block)) = update.update_oneof else {
+            continue;
+        };
+
+        let cached = match cached_blockhash_from_block_meta(&block) {
+            Ok(cached) => cached,
+            Err(error) => {
+                tracing::warn!(
+                    slot = block.slot,
+                    blockhash = %block.blockhash,
+                    error = %error,
+                    "Failed to parse Yellowstone block meta for recent blockhash cache."
+                );
+                continue;
+            }
+        };
+
+        let mut first_usable_value = false;
+        let updated = recent_blockhash_tx.send_if_modified(|current| {
+            if should_replace_cached(current.as_ref(), &cached) {
+                first_usable_value = current.is_none();
+                *current = Some(cached.clone());
+                true
+            } else {
+                false
+            }
+        });
+
+        if updated && first_usable_value {
+            tracing::info!(
+                slot = cached.slot,
+                block_height = cached.block_height,
+                last_valid_block_height = cached.last_valid_block_height,
+                "Recent blockhash cache received first usable value."
+            );
+        }
+    }
+
+    Ok(())
+}
+
 impl AuctionClient {
     /// Create a new [`AuctionClient`].
     ///
@@ -327,6 +465,7 @@ impl AuctionClient {
         let bundle_registry_cache = Arc::new(papaya::HashMap::with_capacity(1024));
         let yellowstone_client =
             CloneableGeyserGrpcClient::new(yellowstone_grpc_url.clone()).await?;
+        let (recent_blockhash_tx, recent_blockhash_rx) = watch::channel(None);
 
         let rpc_client = RpcClient::new_with_timeout(json_rpc_url, Duration::from_secs(300));
 
@@ -338,16 +477,24 @@ impl AuctionClient {
             vote_authority,
             yellowstone_client,
             bundle_registry_cache,
+            recent_blockhash_tx,
+            recent_blockhash_rx,
         })
     }
 
     #[instrument]
     pub async fn keep_cache_warm(&self) -> Result<(), crate::run::Error> {
-        maintain_bundle_registry_cache(
-            self.yellowstone_client.clone(),
-            self.bundle_registry_cache.clone(),
-        )
-        .await
+        tokio::try_join!(
+            maintain_bundle_registry_cache(
+                self.yellowstone_client.clone(),
+                self.bundle_registry_cache.clone(),
+            ),
+            maintain_recent_blockhash_cache(
+                self.yellowstone_client.clone(),
+                self.recent_blockhash_tx.clone(),
+            ),
+        )?;
+        Ok(())
     }
 
     pub async fn wait_for_auction_winner(
@@ -662,6 +809,27 @@ impl AuctionClient {
 
     pub fn yellowstone_client(&self) -> GeyserGrpcClient<impl Interceptor> {
         self.yellowstone_client.clone().0
+    }
+
+    pub async fn get_recent_blockhash_cached(&self) -> Result<Hash, Error> {
+        if let Some(cached) = self.recent_blockhash_rx.borrow().clone() {
+            return Ok(cached.blockhash);
+        }
+
+        if let Some(cached) =
+            wait_for_cached_blockhash(self.recent_blockhash_rx.clone(), Duration::from_millis(500))
+                .await
+        {
+            return Ok(cached.blockhash);
+        }
+
+        tracing::warn!(
+            "Recent blockhash cache was empty after warmup wait; falling back to RPC get_latest_blockhash."
+        );
+        self.rpc_client
+            .get_latest_blockhash()
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn get_bundle_registry_cached(
@@ -1577,15 +1745,7 @@ pub async fn run_auction_and_get_data(
                 let _timer = RPC_CLIENT_TIMINGS
                     .with_label_values(&["get_latest_blockhash"])
                     .start_timer();
-                retry_client
-                    .yellowstone_client
-                    .clone()
-                    .0
-                    .get_latest_blockhash(Some(GrpcCommitmentLevel::Processed))
-                    .await?
-                    .blockhash
-                    .parse::<Hash>()
-                    .expect("to parse hash string")
+                retry_client.get_recent_blockhash_cached().await?
             };
             let tx = VersionedTransaction::try_new(
                 VersionedMessage::V0(Message::try_compile(
@@ -1880,13 +2040,7 @@ pub async fn reclaim_job_request(
     )
     .await??;
 
-    let blockhash = client
-        .yellowstone_client()
-        .get_latest_blockhash(None)
-        .await?
-        .blockhash
-        .parse::<Hash>()
-        .map_err(|e| Error::Custom(format!("Failed to parse recent blockhash: {e}")))?;
+    let blockhash = client.get_recent_blockhash_cached().await?;
 
     let bundle: RequestBundle = client.get_account(&bundle_key).await?;
     let RequestBundle { auction, .. } = bundle;
@@ -2097,6 +2251,88 @@ mod tests {
     use super::*;
     use crate::ID;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn block_meta_update_parses_and_computes_cached_value() {
+        let blockhash = Hash::new_unique();
+        let block = SubscribeUpdateBlockMeta {
+            slot: 42,
+            blockhash: blockhash.to_string(),
+            rewards: None,
+            block_time: None,
+            block_height: Some(
+                yellowstone_grpc_proto::solana::storage::confirmed_block::BlockHeight {
+                    block_height: 9001,
+                },
+            ),
+            parent_slot: 41,
+            parent_blockhash: String::new(),
+            executed_transaction_count: 0,
+            entries_count: 0,
+        };
+
+        let cached = cached_blockhash_from_block_meta(&block).expect("block meta should parse");
+
+        assert_eq!(cached.slot, 42);
+        assert_eq!(cached.blockhash, blockhash);
+        assert_eq!(cached.block_height, Some(9001));
+        assert_eq!(
+            cached.last_valid_block_height,
+            Some(9001 + MAX_RECENT_BLOCKHASHES as u64)
+        );
+    }
+
+    #[test]
+    fn stale_block_meta_does_not_replace_newer_cache() {
+        let current = CachedRecentBlockhash {
+            slot: 101,
+            blockhash: Hash::new_unique(),
+            block_height: Some(500),
+            last_valid_block_height: Some(500 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let stale = CachedRecentBlockhash {
+            slot: 100,
+            blockhash: Hash::new_unique(),
+            block_height: Some(499),
+            last_valid_block_height: Some(499 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+
+        assert!(!should_replace_cached(Some(&current), &stale));
+        assert!(should_replace_cached(Some(&stale), &current));
+    }
+
+    #[tokio::test]
+    async fn cache_wait_helper_returns_after_sender_publish() {
+        let (tx, rx) = watch::channel(None);
+        let expected = CachedRecentBlockhash {
+            slot: 77,
+            blockhash: Hash::new_unique(),
+            block_height: Some(1234),
+            last_valid_block_height: Some(1234 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let expected_clone = expected.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tx.send(Some(expected_clone))
+                .expect("watch receiver should still be alive");
+        });
+
+        let cached = wait_for_cached_blockhash(rx, Duration::from_millis(100))
+            .await
+            .expect("cache wait should resolve");
+
+        assert_eq!(cached, expected);
+    }
+
+    #[tokio::test]
+    async fn cache_wait_helper_times_out_when_no_value_arrives() {
+        let (_tx, rx) = watch::channel(None);
+
+        let cached = wait_for_cached_blockhash(rx, Duration::from_millis(20)).await;
+
+        assert_eq!(cached, None);
+    }
 
     #[tokio::test]
     async fn get_bundle_benchmark() {
