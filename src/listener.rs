@@ -348,6 +348,10 @@ async fn maintain_recent_blockhash_cache(
         })?;
 
     while let Some(upd) = stream.next().await {
+        if recent_blockhash_tx.is_closed() {
+            return Ok(());
+        }
+
         let update = match upd {
             Ok(u) => u,
             Err(error) => {

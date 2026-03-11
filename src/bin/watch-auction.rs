@@ -1,6 +1,6 @@
 use ambient_auction_api::Auction;
-use anyhow::Result;
 use ambient_auction_listener::yellowstone_grpc::{auction_update_request, decode_account_update};
+use anyhow::Result;
 use futures_util::StreamExt;
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::CommitmentLevel;
@@ -13,8 +13,11 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to connect to gRPC server");
 
-    let subscription_req =
-        auction_update_request(ambient_auction_listener::ID, CommitmentLevel::Processed, None);
+    let subscription_req = auction_update_request(
+        ambient_auction_listener::ID,
+        CommitmentLevel::Processed,
+        None,
+    );
 
     let (_sink, mut stream) = grpc_client
         .subscribe_with_request(Some(subscription_req))
