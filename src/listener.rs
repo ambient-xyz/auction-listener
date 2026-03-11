@@ -226,6 +226,17 @@ async fn wait_for_cached_blockhash(
     .flatten()
 }
 
+fn clear_recent_blockhash_cache(tx: &watch::Sender<Option<CachedRecentBlockhash>>) {
+    tx.send_if_modified(|current| {
+        if current.is_some() {
+            *current = None;
+            true
+        } else {
+            false
+        }
+    });
+}
+
 pub struct AuctionClient {
     pub program_id: Pubkey,
     pub rpc_client: RpcClient,
@@ -323,8 +334,9 @@ async fn maintain_bundle_registry_cache(
             registry,
         );
     }
-
-    Ok(())
+    Err(crate::run::Error::Internal(
+        "Yellowstone stream for bundle cache ended unexpectedly.".to_string(),
+    ))
 }
 
 async fn maintain_recent_blockhash_cache(
@@ -355,6 +367,7 @@ async fn maintain_recent_blockhash_cache(
         let update = match upd {
             Ok(u) => u,
             Err(error) => {
+                clear_recent_blockhash_cache(&recent_blockhash_tx);
                 tracing::warn!(
                     ?error,
                     "Yellowstone stream for recent blockhash cache encountered an error."
@@ -402,8 +415,10 @@ async fn maintain_recent_blockhash_cache(
             );
         }
     }
-
-    Ok(())
+    clear_recent_blockhash_cache(&recent_blockhash_tx);
+    Err(crate::run::Error::Internal(
+        "Yellowstone stream for recent blockhash cache ended unexpectedly.".to_string(),
+    ))
 }
 
 impl AuctionClient {
@@ -831,8 +846,9 @@ impl AuctionClient {
             "Recent blockhash cache was empty after warmup wait; falling back to RPC get_latest_blockhash."
         );
         self.rpc_client
-            .get_latest_blockhash()
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .await
+            .map(|(blockhash, _)| blockhash)
             .map_err(Into::into)
     }
 
