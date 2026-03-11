@@ -95,3 +95,7 @@ tokenizer = { git = "https://github.com/ambient-xyz/tokenizer" }
 solana-system-interface = { version = "1.0.0", features = ["bincode"] }
 lz4_flex = "0.11.5"
 papaya = "0.2.3"
+
+[features]
+default =[]
+global-config = ["ambient-auction-client/global-config"]
