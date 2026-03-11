@@ -555,7 +555,7 @@ impl AuctionClient {
                     .verification
                     .verifier_states
                     .iter()
-                    .filter(|s| **s == JobVerificationState::Completed)
+                    .filter(|s| **s == JobVerificationState::Completed.into())
                     .count();
 
                 tracing::debug!("Job status: {:?}", job_request.status);

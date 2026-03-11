@@ -277,7 +277,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-api"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-api#60ebbc1fbcd0b7e786cd16578f4fe80b6759e72c"
+source = "git+https://github.com/ambient-xyz/auction-api#9c1053e4b03e168b640395cb611f46141496f9e5"
 dependencies = [
  "borsh 0.10.4",
  "bs58",
