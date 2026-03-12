@@ -78,6 +78,16 @@ This command starts the local validator helper, runs `init-bundles`, executes th
 validator-backed load test for the fixed request path, and writes artifacts under
 `target/local-blockhash-cache/<run_id>/`.
 
+Unary-race repro on Linux:
+
+```bash
+cargo run --bin repro-yellowstone-unary-race -- \
+  --validator-root ../ambient
+```
+
+This command runs direct Yellowstone unary hammer rounds under `stress-ng`, then writes a
+separate fixed-path validation section under `target/yellowstone-unary-race/<run_id>/`.
+
 ---
 
 ## Workspace assumptions
