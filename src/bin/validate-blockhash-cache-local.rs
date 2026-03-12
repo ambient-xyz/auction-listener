@@ -42,12 +42,10 @@ struct Args {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct LocalHarnessLatencySummary {
-    count: usize,
-    min: u64,
-    p50: u64,
-    p95: u64,
-    p99: u64,
-    max: u64,
+    sample_count: usize,
+    p50_micros: Option<u64>,
+    p95_micros: Option<u64>,
+    p99_micros: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -342,13 +340,21 @@ fn write_latency_section(
 ) -> Result<()> {
     writeln!(file, "## {title}")?;
     writeln!(file)?;
-    writeln!(file, "| Count | Min | P50 | P95 | P99 | Max |")?;
-    writeln!(file, "| ---: | ---: | ---: | ---: | ---: | ---: |")?;
+    writeln!(file, "| Sample Count | P50 | P95 | P99 |")?;
+    writeln!(file, "| ---: | ---: | ---: | ---: |")?;
     writeln!(
         file,
-        "| {} | {} | {} | {} | {} | {} |",
-        summary.count, summary.min, summary.p50, summary.p95, summary.p99, summary.max
+        "| {} | {} | {} | {} |",
+        summary.sample_count,
+        display_optional_latency(summary.p50_micros),
+        display_optional_latency(summary.p95_micros),
+        display_optional_latency(summary.p99_micros),
     )?;
     writeln!(file)?;
     Ok(())
+}
+
+fn display_optional_latency(value: Option<u64>) -> String {
+    value.map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
