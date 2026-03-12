@@ -226,6 +226,36 @@ async fn wait_for_cached_blockhash(
     .flatten()
 }
 
+fn clear_recent_blockhash_cache(tx: &watch::Sender<Option<CachedRecentBlockhash>>) {
+    tx.send_if_modified(|current| {
+        if current.is_some() {
+            *current = None;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn recent_blockhash_stream_error(
+    tx: &watch::Sender<Option<CachedRecentBlockhash>>,
+    error: impl std::fmt::Display,
+) -> crate::run::Error {
+    clear_recent_blockhash_cache(tx);
+    crate::run::Error::Internal(format!(
+        "Error in yellowstone block meta subscription: {error}"
+    ))
+}
+
+fn recent_blockhash_stream_ended(
+    tx: &watch::Sender<Option<CachedRecentBlockhash>>,
+) -> crate::run::Error {
+    clear_recent_blockhash_cache(tx);
+    crate::run::Error::Internal(
+        "Yellowstone stream for recent blockhash cache ended unexpectedly.".to_string(),
+    )
+}
+
 pub struct AuctionClient {
     pub program_id: Pubkey,
     pub rpc_client: RpcClient,
@@ -348,6 +378,10 @@ async fn maintain_recent_blockhash_cache(
         })?;
 
     while let Some(upd) = stream.next().await {
+        if recent_blockhash_tx.is_closed() {
+            return Ok(());
+        }
+
         let update = match upd {
             Ok(u) => u,
             Err(error) => {
@@ -355,9 +389,7 @@ async fn maintain_recent_blockhash_cache(
                     ?error,
                     "Yellowstone stream for recent blockhash cache encountered an error."
                 );
-                return Err(crate::run::Error::Internal(format!(
-                    "Error in yellowstone block meta subscription: {error}"
-                )));
+                return Err(recent_blockhash_stream_error(&recent_blockhash_tx, error));
             }
         };
 
@@ -399,7 +431,7 @@ async fn maintain_recent_blockhash_cache(
         }
     }
 
-    Ok(())
+    Err(recent_blockhash_stream_ended(&recent_blockhash_tx))
 }
 
 impl AuctionClient {
@@ -827,8 +859,9 @@ impl AuctionClient {
             "Recent blockhash cache was empty after warmup wait; falling back to RPC get_latest_blockhash."
         );
         self.rpc_client
-            .get_latest_blockhash()
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .await
+            .map(|(blockhash, _)| blockhash)
             .map_err(Into::into)
     }
 
@@ -2332,6 +2365,62 @@ mod tests {
         let cached = wait_for_cached_blockhash(rx, Duration::from_millis(20)).await;
 
         assert_eq!(cached, None);
+    }
+
+    #[test]
+    fn clear_recent_blockhash_cache_clears_watch_value() {
+        let cached = CachedRecentBlockhash {
+            slot: 12,
+            blockhash: Hash::new_unique(),
+            block_height: Some(34),
+            last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let (tx, rx) = watch::channel(Some(cached));
+
+        clear_recent_blockhash_cache(&tx);
+
+        assert_eq!(*rx.borrow(), None);
+    }
+
+    #[test]
+    fn recent_blockhash_stream_error_clears_cache_and_returns_internal_error() {
+        let cached = CachedRecentBlockhash {
+            slot: 12,
+            blockhash: Hash::new_unique(),
+            block_height: Some(34),
+            last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let (tx, rx) = watch::channel(Some(cached));
+
+        let error = recent_blockhash_stream_error(&tx, "boom");
+
+        assert_eq!(*rx.borrow(), None);
+        assert!(matches!(
+            error,
+            crate::run::Error::Internal(message)
+                if message == "Error in yellowstone block meta subscription: boom"
+        ));
+    }
+
+    #[test]
+    fn recent_blockhash_stream_ended_clears_cache_and_returns_internal_error() {
+        let cached = CachedRecentBlockhash {
+            slot: 12,
+            blockhash: Hash::new_unique(),
+            block_height: Some(34),
+            last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let (tx, rx) = watch::channel(Some(cached));
+
+        let error = recent_blockhash_stream_ended(&tx);
+
+        assert_eq!(*rx.borrow(), None);
+        assert!(matches!(
+            error,
+            crate::run::Error::Internal(message)
+                if message
+                    == "Yellowstone stream for recent blockhash cache ended unexpectedly."
+        ));
     }
 
     #[tokio::test]
