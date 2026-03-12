@@ -256,6 +256,22 @@ fn recent_blockhash_stream_ended(
     )
 }
 
+struct RecentBlockhashCacheDropGuard {
+    tx: watch::Sender<Option<CachedRecentBlockhash>>,
+}
+
+impl RecentBlockhashCacheDropGuard {
+    fn new(tx: watch::Sender<Option<CachedRecentBlockhash>>) -> Self {
+        Self { tx }
+    }
+}
+
+impl Drop for RecentBlockhashCacheDropGuard {
+    fn drop(&mut self) {
+        clear_recent_blockhash_cache(&self.tx);
+    }
+}
+
 pub struct AuctionClient {
     pub program_id: Pubkey,
     pub rpc_client: RpcClient,
@@ -362,6 +378,7 @@ async fn maintain_recent_blockhash_cache(
     recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
 ) -> Result<(), crate::run::Error> {
     tracing::info!("Starting recent blockhash cache subscription.");
+    let _clear_on_drop = RecentBlockhashCacheDropGuard::new(recent_blockhash_tx.clone());
     let (_, mut stream) = geyser
         .0
         .subscribe_with_request(Some(SubscribeRequest {
@@ -2421,6 +2438,24 @@ mod tests {
                 if message
                     == "Yellowstone stream for recent blockhash cache ended unexpectedly."
         ));
+    }
+
+    #[test]
+    fn recent_blockhash_cache_drop_guard_clears_watch_value() {
+        let cached = CachedRecentBlockhash {
+            slot: 13,
+            blockhash: Hash::new_unique(),
+            block_height: Some(55),
+            last_valid_block_height: Some(55 + MAX_RECENT_BLOCKHASHES as u64),
+        };
+        let (tx, rx) = watch::channel(Some(cached));
+
+        {
+            let _guard = RecentBlockhashCacheDropGuard::new(tx.clone());
+            assert!(rx.borrow().is_some());
+        }
+
+        assert_eq!(*rx.borrow(), None);
     }
 
     #[tokio::test]
