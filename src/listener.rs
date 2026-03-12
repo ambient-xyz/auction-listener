@@ -44,8 +44,9 @@ use std::any::type_name;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -174,7 +175,10 @@ struct CachedRecentBlockhash {
     blockhash: Hash,
     block_height: Option<u64>,
     last_valid_block_height: Option<u64>,
+    observed_at: Instant,
 }
+
+const RECENT_BLOCKHASH_CACHE_MAX_AGE: Duration = Duration::from_secs(30);
 
 fn cached_blockhash_from_block_meta(
     block: &SubscribeUpdateBlockMeta,
@@ -189,7 +193,12 @@ fn cached_blockhash_from_block_meta(
         block_height,
         last_valid_block_height: block_height
             .and_then(|height| height.checked_add(MAX_RECENT_BLOCKHASHES as u64)),
+        observed_at: Instant::now(),
     })
+}
+
+fn cached_blockhash_is_usable(cached: &CachedRecentBlockhash, now: Instant) -> bool {
+    now.saturating_duration_since(cached.observed_at) <= RECENT_BLOCKHASH_CACHE_MAX_AGE
 }
 
 fn should_replace_cached(
@@ -206,7 +215,11 @@ async fn wait_for_cached_blockhash(
     mut rx: watch::Receiver<Option<CachedRecentBlockhash>>,
     timeout_duration: Duration,
 ) -> Option<CachedRecentBlockhash> {
-    if let Some(cached) = rx.borrow().clone() {
+    if let Some(cached) = rx
+        .borrow()
+        .clone()
+        .filter(|cached| cached_blockhash_is_usable(cached, Instant::now()))
+    {
         return Some(cached);
     }
 
@@ -216,7 +229,11 @@ async fn wait_for_cached_blockhash(
                 return None;
             }
 
-            if let Some(cached) = rx.borrow().clone() {
+            if let Some(cached) = rx
+                .borrow()
+                .clone()
+                .filter(|cached| cached_blockhash_is_usable(cached, Instant::now()))
+            {
                 return Some(cached);
             }
         }
@@ -258,16 +275,19 @@ fn recent_blockhash_stream_ended(
 
 struct RecentBlockhashCacheDropGuard {
     tx: watch::Sender<Option<CachedRecentBlockhash>>,
+    running: Arc<AtomicBool>,
 }
 
 impl RecentBlockhashCacheDropGuard {
-    fn new(tx: watch::Sender<Option<CachedRecentBlockhash>>) -> Self {
-        Self { tx }
+    fn new(tx: watch::Sender<Option<CachedRecentBlockhash>>, running: Arc<AtomicBool>) -> Self {
+        running.store(true, Ordering::Relaxed);
+        Self { tx, running }
     }
 }
 
 impl Drop for RecentBlockhashCacheDropGuard {
     fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
         clear_recent_blockhash_cache(&self.tx);
     }
 }
@@ -283,6 +303,7 @@ pub struct AuctionClient {
     bundle_registry_cache: Arc<papaya::HashMap<Pubkey, BundleRegistry>>,
     recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
     recent_blockhash_rx: watch::Receiver<Option<CachedRecentBlockhash>>,
+    recent_blockhash_cache_running: Arc<AtomicBool>,
 }
 impl std::fmt::Debug for AuctionClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -376,9 +397,9 @@ async fn maintain_bundle_registry_cache(
 async fn maintain_recent_blockhash_cache(
     mut geyser: CloneableGeyserGrpcClient,
     recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
+    recent_blockhash_cache_running: Arc<AtomicBool>,
 ) -> Result<(), crate::run::Error> {
     tracing::info!("Starting recent blockhash cache subscription.");
-    let _clear_on_drop = RecentBlockhashCacheDropGuard::new(recent_blockhash_tx.clone());
     let (_, mut stream) = geyser
         .0
         .subscribe_with_request(Some(SubscribeRequest {
@@ -393,6 +414,10 @@ async fn maintain_recent_blockhash_cache(
         .inspect_err(|e| {
             tracing::error!(error = %e, "Error subscribing to block meta updates");
         })?;
+    let _clear_on_drop = RecentBlockhashCacheDropGuard::new(
+        recent_blockhash_tx.clone(),
+        recent_blockhash_cache_running,
+    );
 
     while let Some(upd) = stream.next().await {
         if recent_blockhash_tx.is_closed() {
@@ -515,6 +540,7 @@ impl AuctionClient {
         let yellowstone_client =
             CloneableGeyserGrpcClient::new(yellowstone_grpc_url.clone()).await?;
         let (recent_blockhash_tx, recent_blockhash_rx) = watch::channel(None);
+        let recent_blockhash_cache_running = Arc::new(AtomicBool::new(false));
 
         let rpc_client = RpcClient::new_with_timeout(json_rpc_url, Duration::from_secs(300));
 
@@ -528,6 +554,7 @@ impl AuctionClient {
             bundle_registry_cache,
             recent_blockhash_tx,
             recent_blockhash_rx,
+            recent_blockhash_cache_running,
         })
     }
 
@@ -541,6 +568,7 @@ impl AuctionClient {
             maintain_recent_blockhash_cache(
                 self.yellowstone_client.clone(),
                 self.recent_blockhash_tx.clone(),
+                self.recent_blockhash_cache_running.clone(),
             ),
         )?;
         Ok(())
@@ -860,26 +888,60 @@ impl AuctionClient {
         self.yellowstone_client.clone().0
     }
 
-    pub async fn get_recent_blockhash_cached(&self) -> Result<Hash, Error> {
-        if let Some(cached) = self.recent_blockhash_rx.borrow().clone() {
-            return Ok(cached.blockhash);
-        }
-
-        if let Some(cached) =
-            wait_for_cached_blockhash(self.recent_blockhash_rx.clone(), Duration::from_millis(500))
-                .await
-        {
-            return Ok(cached.blockhash);
-        }
-
-        tracing::warn!(
-            "Recent blockhash cache was empty after warmup wait; falling back to RPC get_latest_blockhash."
-        );
+    async fn get_recent_blockhash_from_rpc(&self) -> Result<Hash, Error> {
         self.rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .await
             .map(|(blockhash, _)| blockhash)
             .map_err(Into::into)
+    }
+
+    pub async fn get_recent_blockhash_cached(&self) -> Result<Hash, Error> {
+        let cached = self.recent_blockhash_rx.borrow().clone();
+        if let Some(cached) = cached {
+            if cached_blockhash_is_usable(&cached, Instant::now()) {
+                return Ok(cached.blockhash);
+        }
+
+        tracing::warn!(
+            "Recent blockhash cache contained a stale value; waiting briefly for a fresh value before falling back to RPC get_latest_blockhash."
+        );
+        if self
+            .recent_blockhash_cache_running
+            .load(Ordering::Relaxed)
+        {
+                if let Some(cached) = wait_for_cached_blockhash(
+                    self.recent_blockhash_rx.clone(),
+                    Duration::from_millis(500),
+                )
+                .await
+                {
+                    return Ok(cached.blockhash);
+                }
+            }
+
+            return self.get_recent_blockhash_from_rpc().await;
+        }
+
+        if self
+            .recent_blockhash_cache_running
+            .load(Ordering::Relaxed)
+        {
+            if let Some(cached) = wait_for_cached_blockhash(
+                self.recent_blockhash_rx.clone(),
+                Duration::from_millis(500),
+            )
+            .await
+            {
+                return Ok(cached.blockhash);
+            }
+
+            tracing::warn!(
+                "Recent blockhash cache was empty after warmup wait; falling back to RPC get_latest_blockhash."
+            );
+        }
+
+        self.get_recent_blockhash_from_rpc().await
     }
 
     pub async fn get_bundle_registry_cached(
@@ -2339,12 +2401,14 @@ mod tests {
             blockhash: Hash::new_unique(),
             block_height: Some(500),
             last_valid_block_height: Some(500 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let stale = CachedRecentBlockhash {
             slot: 100,
             blockhash: Hash::new_unique(),
             block_height: Some(499),
             last_valid_block_height: Some(499 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
 
         assert!(!should_replace_cached(Some(&current), &stale));
@@ -2359,6 +2423,7 @@ mod tests {
             blockhash: Hash::new_unique(),
             block_height: Some(1234),
             last_valid_block_height: Some(1234 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let expected_clone = expected.clone();
 
@@ -2385,12 +2450,26 @@ mod tests {
     }
 
     #[test]
+    fn cached_blockhash_is_not_usable_after_max_age() {
+        let cached = CachedRecentBlockhash {
+            slot: 12,
+            blockhash: Hash::new_unique(),
+            block_height: Some(34),
+            last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now() - RECENT_BLOCKHASH_CACHE_MAX_AGE - Duration::from_secs(1),
+        };
+
+        assert!(!cached_blockhash_is_usable(&cached, Instant::now()));
+    }
+
+    #[test]
     fn clear_recent_blockhash_cache_clears_watch_value() {
         let cached = CachedRecentBlockhash {
             slot: 12,
             blockhash: Hash::new_unique(),
             block_height: Some(34),
             last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let (tx, rx) = watch::channel(Some(cached));
 
@@ -2406,6 +2485,7 @@ mod tests {
             blockhash: Hash::new_unique(),
             block_height: Some(34),
             last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let (tx, rx) = watch::channel(Some(cached));
 
@@ -2426,6 +2506,7 @@ mod tests {
             blockhash: Hash::new_unique(),
             block_height: Some(34),
             last_valid_block_height: Some(34 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let (tx, rx) = watch::channel(Some(cached));
 
@@ -2447,15 +2528,19 @@ mod tests {
             blockhash: Hash::new_unique(),
             block_height: Some(55),
             last_valid_block_height: Some(55 + MAX_RECENT_BLOCKHASHES as u64),
+            observed_at: Instant::now(),
         };
         let (tx, rx) = watch::channel(Some(cached));
+        let running = Arc::new(AtomicBool::new(false));
 
         {
-            let _guard = RecentBlockhashCacheDropGuard::new(tx.clone());
+            let _guard = RecentBlockhashCacheDropGuard::new(tx.clone(), running.clone());
             assert!(rx.borrow().is_some());
+            assert!(running.load(Ordering::Relaxed));
         }
 
         assert_eq!(*rx.borrow(), None);
+        assert!(!running.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
