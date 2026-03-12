@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{anyhow, bail, Context, Result};
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::{Auction, BundleRegistry, JobRequest, RequestTier, BUNDLE_REGISTRY_SEED};
@@ -22,6 +24,7 @@ use std::fs::File;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -200,6 +203,23 @@ pub struct ValidationSummary {
     pub fallback_warning_count: usize,
     pub blockhash_acquisition_latency_micros: LatencySummary,
     pub request_latency_micros: LatencySummary,
+    pub blockhash_latency_samples_micros: Vec<u64>,
+    pub request_latency_samples_micros: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BlockhashSource {
+    Cache,
+    YellowstoneUnary,
+}
+
+impl BlockhashSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache => "cache",
+            Self::YellowstoneUnary => "yellowstone-unary",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +315,50 @@ struct RequestWorkloadContext {
 struct RequestOutcome {
     blockhash_latency_micros: u64,
     request_latency_micros: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnaryHammerConfig {
+    pub unary_concurrency: usize,
+    pub slot_spam_concurrency: usize,
+    pub transfer_lamports: u64,
+}
+
+#[derive(Default)]
+struct UnaryHammerStats {
+    requests_attempted: AtomicU64,
+    success_count: AtomicU64,
+    block_not_available_yet_count: AtomicU64,
+    other_error_count: AtomicU64,
+    parse_error_count: AtomicU64,
+    slot_spam_success_count: AtomicU64,
+    slot_spam_error_count: AtomicU64,
+    first_block_not_available_sample: std::sync::Mutex<Option<String>>,
+    first_other_error_sample: std::sync::Mutex<Option<String>>,
+    first_parse_error_sample: std::sync::Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnaryHammerSummary {
+    pub requests_attempted: u64,
+    pub success_count: u64,
+    pub block_not_available_yet_count: u64,
+    pub other_error_count: u64,
+    pub parse_error_count: u64,
+    pub slot_spam_success_count: u64,
+    pub slot_spam_error_count: u64,
+    pub first_block_not_available_sample: Option<String>,
+    pub first_other_error_sample: Option<String>,
+    pub first_parse_error_sample: Option<String>,
+}
+
+impl UnaryHammerSummary {
+    pub fn first_blocking_error(&self) -> Option<&str> {
+        self.first_block_not_available_sample
+            .as_deref()
+            .or(self.first_other_error_sample.as_deref())
+            .or(self.first_parse_error_sample.as_deref())
+    }
 }
 
 pub fn default_auction_listener_root() -> PathBuf {
@@ -406,6 +470,21 @@ pub async fn run_cache_validation(
     config: ValidationConfig,
     fallback_counter: FallbackWarningCounter,
 ) -> Result<ValidationSummary> {
+    run_validation_with_blockhash_source(
+        client,
+        config,
+        fallback_counter,
+        BlockhashSource::Cache,
+    )
+    .await
+}
+
+pub async fn run_validation_with_blockhash_source(
+    client: Arc<AuctionClient>,
+    config: ValidationConfig,
+    fallback_counter: FallbackWarningCounter,
+    blockhash_source: BlockhashSource,
+) -> Result<ValidationSummary> {
     let keep_cache_warm_task = tokio::spawn({
         let client = client.clone();
         async move { client.keep_cache_warm().await }
@@ -420,7 +499,16 @@ pub async fn run_cache_validation(
             let client = client.clone();
             let config = config.clone();
             let workload_context = workload_context.clone();
-            async move { run_single_cache_request(index, client, &config, &workload_context).await }
+            async move {
+                run_single_request(
+                    index,
+                    client,
+                    &config,
+                    &workload_context,
+                    blockhash_source,
+                )
+                .await
+            }
         })
         .buffer_unordered(config.concurrency)
         .collect::<Vec<_>>()
@@ -492,6 +580,8 @@ fn summarize_validation(
         fallback_warning_count,
         blockhash_acquisition_latency_micros: summarize_latencies(&blockhash_latencies),
         request_latency_micros: summarize_latencies(&request_latencies),
+        blockhash_latency_samples_micros: blockhash_latencies,
+        request_latency_samples_micros: request_latencies,
     })
 }
 
@@ -567,11 +657,12 @@ fn hash_prompt(prompt: &str) -> [u8; 32] {
     output
 }
 
-async fn run_single_cache_request(
+async fn run_single_request(
     request_index: usize,
     client: Arc<AuctionClient>,
     config: &ValidationConfig,
     workload: &RequestWorkloadContext,
+    blockhash_source: BlockhashSource,
 ) -> Result<RequestOutcome> {
     let request_started = Instant::now();
     let bundle = latest_bundle_for_tiers(
@@ -595,10 +686,7 @@ async fn run_single_cache_request(
     let payer_key = client.keypair.pubkey();
 
     let blockhash_started = Instant::now();
-    let recent_blockhash = client
-        .get_recent_blockhash_cached()
-        .await
-        .context("failed to fetch cached recent blockhash")?;
+    let recent_blockhash = request_blockhash(&client, blockhash_source).await?;
     let blockhash_latency_micros = blockhash_started.elapsed().as_micros() as u64;
 
     let tx = VersionedTransaction::try_new(
@@ -633,6 +721,31 @@ async fn run_single_cache_request(
         blockhash_latency_micros,
         request_latency_micros: request_started.elapsed().as_micros() as u64,
     })
+}
+
+async fn request_blockhash(
+    client: &Arc<AuctionClient>,
+    blockhash_source: BlockhashSource,
+) -> Result<solana_sdk::hash::Hash> {
+    match blockhash_source {
+        BlockhashSource::Cache => client
+            .get_recent_blockhash_cached()
+            .await
+            .context("failed to fetch cached recent blockhash"),
+        BlockhashSource::YellowstoneUnary => {
+            let response = client
+                .yellowstone_client()
+                .get_latest_blockhash(Some(yellowstone_grpc_proto::geyser::CommitmentLevel::Processed))
+                .await
+                .context("failed to fetch unary recent blockhash")?;
+            solana_sdk::hash::Hash::from_str(&response.blockhash).with_context(|| {
+                format!(
+                    "failed to parse Yellowstone unary blockhash `{}`",
+                    response.blockhash
+                )
+            })
+        }
+    }
 }
 
 fn build_request_job_instruction(
@@ -750,6 +863,185 @@ async fn send_self_transfer(client: &Arc<AuctionClient>, sequence: u64) -> Resul
         .context("failed to submit warmup transfer")?;
 
     Ok(())
+}
+
+pub async fn run_unary_hammer_load(
+    client: Arc<AuctionClient>,
+    config: UnaryHammerConfig,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> UnaryHammerSummary {
+    let stats = Arc::new(UnaryHammerStats::default());
+    let mut tasks = Vec::new();
+
+    for _ in 0..config.unary_concurrency {
+        tasks.push(tokio::spawn(run_unary_worker(
+            client.clone(),
+            stop.clone(),
+            stats.clone(),
+        )));
+    }
+
+    for worker_id in 0..config.slot_spam_concurrency {
+        tasks.push(tokio::spawn(run_slot_spam_worker(
+            worker_id,
+            client.clone(),
+            config.transfer_lamports,
+            stop.clone(),
+            stats.clone(),
+        )));
+    }
+
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    build_unary_hammer_summary(&stats)
+}
+
+async fn run_unary_worker(
+    client: Arc<AuctionClient>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    stats: Arc<UnaryHammerStats>,
+) {
+    let mut yellowstone = client.yellowstone_client();
+    while stop.load(Ordering::Relaxed) {
+        stats.requests_attempted.fetch_add(1, Ordering::Relaxed);
+        match yellowstone
+            .get_latest_blockhash(Some(yellowstone_grpc_proto::geyser::CommitmentLevel::Processed))
+            .await
+        {
+            Ok(response) => match solana_sdk::hash::Hash::from_str(&response.blockhash) {
+                Ok(_) => {
+                    stats.success_count.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    stats.parse_error_count.fetch_add(1, Ordering::Relaxed);
+                    record_first_sample(
+                        &stats.first_parse_error_sample,
+                        format!(
+                            "failed to parse blockhash '{}': {error}",
+                            response.blockhash
+                        ),
+                    );
+                }
+            },
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("block is not available yet") {
+                    stats
+                        .block_not_available_yet_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    record_first_sample(&stats.first_block_not_available_sample, message);
+                } else {
+                    stats.other_error_count.fetch_add(1, Ordering::Relaxed);
+                    record_first_sample(&stats.first_other_error_sample, message);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+    }
+}
+
+async fn run_slot_spam_worker(
+    worker_id: usize,
+    client: Arc<AuctionClient>,
+    transfer_lamports: u64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    stats: Arc<UnaryHammerStats>,
+) {
+    let mut sequence = 0u64;
+    let payer = &client.keypair;
+    let rpc_client = &client.rpc_client;
+
+    while stop.load(Ordering::Relaxed) {
+        let recent_blockhash = match rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
+            .await
+        {
+            Ok((blockhash, _)) => blockhash,
+            Err(_) => {
+                stats.slot_spam_error_count.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+        };
+
+        let unique_cu_price = ((worker_id as u64) << 32) | sequence;
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_price(unique_cu_price),
+            transfer(&payer.pubkey(), &payer.pubkey(), transfer_lamports),
+        ];
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&payer.pubkey()),
+            &[payer],
+            recent_blockhash,
+        );
+
+        match rpc_client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    skip_preflight: true,
+                    preflight_commitment: Some(
+                        solana_sdk::commitment_config::CommitmentLevel::Processed,
+                    ),
+                    encoding: None,
+                    max_retries: Some(0),
+                    min_context_slot: None,
+                },
+            )
+            .await
+        {
+            Ok(_) => {
+                stats
+                    .slot_spam_success_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                stats.slot_spam_error_count.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        sequence = sequence.wrapping_add(1);
+    }
+}
+
+fn record_first_sample(slot: &std::sync::Mutex<Option<String>>, sample: String) {
+    let mut guard = slot.lock().expect("stats mutex poisoned");
+    if guard.is_none() {
+        *guard = Some(sample);
+    }
+}
+
+fn build_unary_hammer_summary(stats: &UnaryHammerStats) -> UnaryHammerSummary {
+    UnaryHammerSummary {
+        requests_attempted: stats.requests_attempted.load(Ordering::Relaxed),
+        success_count: stats.success_count.load(Ordering::Relaxed),
+        block_not_available_yet_count: stats
+            .block_not_available_yet_count
+            .load(Ordering::Relaxed),
+        other_error_count: stats.other_error_count.load(Ordering::Relaxed),
+        parse_error_count: stats.parse_error_count.load(Ordering::Relaxed),
+        slot_spam_success_count: stats.slot_spam_success_count.load(Ordering::Relaxed),
+        slot_spam_error_count: stats.slot_spam_error_count.load(Ordering::Relaxed),
+        first_block_not_available_sample: stats
+            .first_block_not_available_sample
+            .lock()
+            .expect("stats mutex poisoned")
+            .clone(),
+        first_other_error_sample: stats
+            .first_other_error_sample
+            .lock()
+            .expect("stats mutex poisoned")
+            .clone(),
+        first_parse_error_sample: stats
+            .first_parse_error_sample
+            .lock()
+            .expect("stats mutex poisoned")
+            .clone(),
+    }
 }
 
 fn canonicalize_existing(path: &Path, label: &str) -> Result<PathBuf> {
