@@ -67,17 +67,6 @@ cargo build
 cargo test
 ````
 
-Local Linux validation of the cache-backed request path:
-
-```bash
-cargo run --bin validate-blockhash-cache-local -- \
-  --validator-root ../ambient
-```
-
-This command starts the local validator helper, runs `init-bundles`, executes the ignored
-validator-backed load test for the fixed request path, and writes artifacts under
-`target/local-blockhash-cache/<run_id>/`.
-
 ---
 
 ## Workspace assumptions

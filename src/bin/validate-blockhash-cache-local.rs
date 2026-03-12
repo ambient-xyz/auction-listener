@@ -3,18 +3,16 @@ mod harness_support;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use harness_support::{
-    default_run_dir, preflight_linux, PreparedCargoContext, RepoPaths, ValidatorStack,
+    build_client, default_run_dir, preflight_linux, run_cache_validation, FallbackWarningCounter,
+    FallbackWarningLayer, RepoPaths, ValidationConfig, ValidationSummary, ValidatorStack,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use tracing_subscriber::prelude::*;
 
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8899";
 const DEFAULT_YELLOWSTONE_URL: &str = "http://127.0.0.1:10000";
-const TEST_NAME: &str = "request_submission_uses_cache_backed_blockhash_under_load_local";
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -35,38 +33,17 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     concurrency: usize,
     #[arg(long, default_value_t = 8)]
-    additional_bundles: usize,
+    additional_bundles: u64,
     #[arg(long, default_value_t = 100)]
     max_price: u64,
+    #[arg(long, default_value_t = 100)]
+    max_price_per_output_token: u64,
+    #[arg(long, default_value_t = 100)]
+    max_output_tokens: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LocalHarnessLatencySummary {
-    sample_count: usize,
-    p50_micros: Option<u64>,
-    p95_micros: Option<u64>,
-    p99_micros: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LocalHarnessRunSummary {
-    requests_attempted: usize,
-    requests_succeeded: usize,
-    requests_failed: usize,
-    concurrency: usize,
-    block_not_available_yet_count: usize,
-    other_error_count: usize,
-    first_blocking_error: Option<String>,
-    keep_cache_warm_alive: bool,
-    teardown_cancelled: bool,
-    blockhash_source_counts: BTreeMap<String, usize>,
-    blockhash_acquisition_latency_micros: LocalHarnessLatencySummary,
-    request_latency_micros: LocalHarnessLatencySummary,
-    blockhash_acquisition_latency_samples_micros: Vec<u64>,
-    request_latency_samples_micros: Vec<u64>,
-}
-
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let mut args = Args::parse();
     if args.auction_listener_root.is_none() {
         args.auction_listener_root = std::env::var_os("AUCTION_LISTENER_ROOT").map(PathBuf::from);
@@ -80,6 +57,7 @@ fn main() -> Result<()> {
     if args.run_dir.is_none() {
         args.run_dir = std::env::var_os("RUN_DIR").map(PathBuf::from);
     }
+
     let repo_paths = RepoPaths::discover(
         args.auction_listener_root.clone(),
         args.validator_root.clone(),
@@ -93,90 +71,34 @@ fn main() -> Result<()> {
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("failed to create {}", run_dir.display()))?;
 
-    let cargo_context = PreparedCargoContext::prepare(&repo_paths, &run_dir)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build tokio runtime")?;
+    let fallback_counter = FallbackWarningCounter::default();
+    install_tracing(fallback_counter.clone())?;
 
-    let mut validator = rt.block_on(ValidatorStack::start(
-        &repo_paths,
-        &cargo_context,
-        &run_dir,
-        &args.rpc_url,
-        &args.yellowstone_url,
-    ))?;
-
-    let results_json_path = run_dir.join("summary.json");
-    let test_log_path = run_dir.join("validation-test.log");
-    let summary_md_path = run_dir.join("summary.md");
-
-    let test_stdout = File::create(&test_log_path)
-        .with_context(|| format!("failed to create {}", test_log_path.display()))?;
-    let test_stderr = test_stdout
-        .try_clone()
-        .with_context(|| format!("failed to clone {}", test_log_path.display()))?;
-
-    let status = Command::new("cargo")
-        .arg("--config")
-        .arg(&cargo_context.config_path)
-        .arg("test")
-        .arg("--manifest-path")
-        .arg(repo_paths.auction_listener_root.join("Cargo.toml"))
-        .arg("--lib")
-        .arg(TEST_NAME)
-        .arg("--")
-        .arg("--ignored")
-        .arg("--nocapture")
-        .env("CARGO_TARGET_DIR", run_dir.join("validation-target"))
-        .env("AMBIENT_LOCAL_RPC_URL", &validator.rpc_url)
-        .env("AMBIENT_LOCAL_YELLOWSTONE_URL", &validator.yellowstone_url)
-        .env("AMBIENT_LOCAL_PAYER_KEYPAIR", &validator.payer_keypair)
-        .env("AMBIENT_LOCAL_REQUESTS", args.request_count.to_string())
-        .env("AMBIENT_LOCAL_CONCURRENCY", args.concurrency.to_string())
-        .env(
-            "AMBIENT_LOCAL_ADDITIONAL_BUNDLES",
-            args.additional_bundles.to_string(),
-        )
-        .env("AMBIENT_LOCAL_MAX_PRICE", args.max_price.to_string())
-        .env("AMBIENT_LOCAL_RESULTS_JSON", &results_json_path)
-        .stdout(Stdio::from(test_stdout))
-        .stderr(Stdio::from(test_stderr))
-        .status()
-        .context("failed to run fixed-path local validation test")?;
-
-    let stop_result = validator.stop();
-    let summary = if results_json_path.is_file() {
-        let raw = fs::read_to_string(&results_json_path)
-            .with_context(|| format!("failed to read {}", results_json_path.display()))?;
-        Some(
-            serde_json::from_str::<LocalHarnessRunSummary>(&raw)
-                .with_context(|| format!("failed to parse {}", results_json_path.display()))?,
-        )
-    } else {
-        None
+    let mut validator =
+        ValidatorStack::start(&repo_paths, &run_dir, &args.rpc_url, &args.yellowstone_url).await?;
+    let client = build_client(&validator).await?;
+    let config = ValidationConfig {
+        request_count: args.request_count,
+        concurrency: args.concurrency,
+        additional_bundles: Some(args.additional_bundles),
+        max_price: args.max_price,
+        max_price_per_output_token: args.max_price_per_output_token,
+        max_output_tokens: args.max_output_tokens,
+        context_length_tier: ambient_auction_api::RequestTier::Standard,
+        expiry_duration_tier: ambient_auction_api::RequestTier::Standard,
+        prompt: ValidationConfig::default_prompt(),
     };
 
-    write_summary_markdown(
-        &summary_md_path,
-        &run_dir,
-        &validator,
-        &test_log_path,
-        &results_json_path,
-        summary.as_ref(),
-        status.success(),
-    )?;
-
+    let run_result = run_cache_validation(client, config, fallback_counter).await;
+    let stop_result = validator.stop();
     stop_result?;
 
-    if !status.success() {
-        bail!(
-            "local blockhash cache validation failed; see {}",
-            test_log_path.display()
-        );
-    }
+    let summary = run_result?;
+    let summary_json_path = run_dir.join("summary.json");
+    let summary_md_path = run_dir.join("summary.md");
+    write_summary_json(&summary_json_path, &summary)?;
+    write_summary_markdown(&summary_md_path, &summary, &validator)?;
 
-    let summary = summary.context("validation test did not write summary.json")?;
     if summary.block_not_available_yet_count != 0 {
         bail!(
             "validation saw {} `block is not available yet` errors; see {}",
@@ -184,34 +106,22 @@ fn main() -> Result<()> {
             summary_md_path.display()
         );
     }
-    if summary.requests_failed != 0 {
+    if summary.other_error_count != 0 || summary.requests_failed != 0 {
         bail!(
-            "validation had {} request failures; see {}",
-            summary.requests_failed,
+            "validation had request failures; see {}",
             summary_md_path.display()
         );
     }
-    if summary
-        .blockhash_source_counts
-        .get("rpc-fallback")
-        .copied()
-        .unwrap_or(0)
-        != 0
-    {
+    if summary.fallback_warning_count != 0 {
         bail!(
-            "validation used RPC fallback blockhashes; see {}",
+            "validation observed {} RPC fallback warnings; see {}",
+            summary.fallback_warning_count,
             summary_md_path.display()
         );
     }
-    if summary
-        .blockhash_source_counts
-        .get("cache")
-        .copied()
-        .unwrap_or(0)
-        == 0
-    {
+    if !summary.keep_cache_warm_alive {
         bail!(
-            "validation did not record any cache-backed blockhash reads; see {}",
+            "keep_cache_warm exited before the workload completed; see {}",
             summary_md_path.display()
         );
     }
@@ -220,123 +130,80 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn write_summary_markdown(
-    summary_md_path: &PathBuf,
-    run_dir: &PathBuf,
-    validator: &ValidatorStack,
-    test_log_path: &PathBuf,
-    results_json_path: &PathBuf,
-    summary: Option<&LocalHarnessRunSummary>,
-    test_succeeded: bool,
-) -> Result<()> {
-    let mut file = File::create(summary_md_path)
-        .with_context(|| format!("failed to create {}", summary_md_path.display()))?;
+fn install_tracing(fallback_counter: FallbackWarningCounter) -> Result<()> {
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(FallbackWarningLayer::new(fallback_counter));
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|error| anyhow::anyhow!("failed to install tracing subscriber: {error}"))
+}
 
+fn write_summary_json(path: &Path, summary: &ValidationSummary) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    serde_json::to_writer_pretty(file, summary)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn write_summary_markdown(
+    path: &Path,
+    summary: &ValidationSummary,
+    validator: &ValidatorStack,
+) -> Result<()> {
+    let mut file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     writeln!(file, "# Local Blockhash Cache Validation")?;
     writeln!(file)?;
-    writeln!(file, "- Run dir: `{}`", run_dir.display())?;
+    writeln!(file, "| Field | Value |")?;
+    writeln!(file, "| --- | --- |")?;
+    writeln!(file, "| Requests attempted | {} |", summary.requests_attempted)?;
+    writeln!(file, "| Requests succeeded | {} |", summary.requests_succeeded)?;
+    writeln!(file, "| Requests failed | {} |", summary.requests_failed)?;
     writeln!(
         file,
-        "- Test result: {}",
-        if test_succeeded { "pass" } else { "fail" }
+        "| `block is not available yet` count | {} |",
+        summary.block_not_available_yet_count
+    )?;
+    writeln!(file, "| Other error count | {} |", summary.other_error_count)?;
+    writeln!(
+        file,
+        "| Fallback warning count | {} |",
+        summary.fallback_warning_count
     )?;
     writeln!(
         file,
-        "- Validator log: `{}`",
-        validator.validator_log.display()
+        "| `keep_cache_warm()` alive | {} |",
+        summary.keep_cache_warm_alive
     )?;
+    writeln!(
+        file,
+        "| First blocking error | {} |",
+        summary
+            .first_blocking_error
+            .clone()
+            .unwrap_or_else(|| "none".to_string())
+    )?;
+    writeln!(file)?;
+    write_latency_section(
+        &mut file,
+        "Blockhash Acquisition Latency (micros)",
+        &summary.blockhash_acquisition_latency_micros,
+    )?;
+    write_latency_section(&mut file, "Request Latency (micros)", &summary.request_latency_micros)?;
+    writeln!(file, "## Logs")?;
+    writeln!(file)?;
+    writeln!(file, "- Validator log: `{}`", validator.validator_log.display())?;
     writeln!(
         file,
         "- init-bundles log: `{}`",
         validator.init_bundles_log.display()
     )?;
-    writeln!(file, "- Test log: `{}`", test_log_path.display())?;
-    writeln!(file, "- Summary JSON: `{}`", results_json_path.display())?;
-    writeln!(file)?;
-
-    if let Some(summary) = summary {
-        writeln!(file, "## Summary")?;
-        writeln!(file)?;
-        writeln!(file, "| Field | Value |")?;
-        writeln!(file, "| --- | --- |")?;
-        writeln!(
-            file,
-            "| Requests attempted | {} |",
-            summary.requests_attempted
-        )?;
-        writeln!(
-            file,
-            "| Requests succeeded | {} |",
-            summary.requests_succeeded
-        )?;
-        writeln!(file, "| Requests failed | {} |", summary.requests_failed)?;
-        writeln!(
-            file,
-            "| `block is not available yet` count | {} |",
-            summary.block_not_available_yet_count
-        )?;
-        writeln!(
-            file,
-            "| Other error count | {} |",
-            summary.other_error_count
-        )?;
-        writeln!(
-            file,
-            "| `keep_cache_warm()` alive | {} |",
-            summary.keep_cache_warm_alive
-        )?;
-        writeln!(
-            file,
-            "| Teardown cancelled cleanly | {} |",
-            summary.teardown_cancelled
-        )?;
-        writeln!(
-            file,
-            "| Cache-backed reads | {} |",
-            summary
-                .blockhash_source_counts
-                .get("cache")
-                .copied()
-                .unwrap_or(0)
-        )?;
-        writeln!(
-            file,
-            "| RPC fallbacks | {} |",
-            summary
-                .blockhash_source_counts
-                .get("rpc-fallback")
-                .copied()
-                .unwrap_or(0)
-        )?;
-        writeln!(
-            file,
-            "| First blocking error | {} |",
-            summary
-                .first_blocking_error
-                .clone()
-                .unwrap_or_else(|| "none".to_string())
-        )?;
-        writeln!(file)?;
-
-        write_latency_section(
-            &mut file,
-            "Blockhash Acquisition Latency (micros)",
-            &summary.blockhash_acquisition_latency_micros,
-        )?;
-        write_latency_section(
-            &mut file,
-            "Request Latency (micros)",
-            &summary.request_latency_micros,
-        )?;
-    }
-
     Ok(())
 }
 
 fn write_latency_section(
     file: &mut File,
     title: &str,
-    summary: &LocalHarnessLatencySummary,
+    summary: &harness_support::LatencySummary,
 ) -> Result<()> {
     writeln!(file, "## {title}")?;
     writeln!(file)?;
@@ -346,15 +213,16 @@ fn write_latency_section(
         file,
         "| {} | {} | {} | {} |",
         summary.sample_count,
-        display_optional_latency(summary.p50_micros),
-        display_optional_latency(summary.p95_micros),
-        display_optional_latency(summary.p99_micros),
+        display_optional(summary.p50_micros),
+        display_optional(summary.p95_micros),
+        display_optional(summary.p99_micros),
     )?;
     writeln!(file)?;
     Ok(())
 }
 
-fn display_optional_latency(value: Option<u64>) -> String {
-    value.map(|value| value.to_string())
+fn display_optional(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string())
 }

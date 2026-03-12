@@ -176,36 +176,6 @@ struct CachedRecentBlockhash {
     last_valid_block_height: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LocalHarnessBlockhashSource {
-    Cache,
-    RpcFallback,
-}
-
-impl LocalHarnessBlockhashSource {
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cache => "cache",
-            Self::RpcFallback => "rpc-fallback",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SubmittedJobRequest {
-    signature: Signature,
-    job_request_id: Pubkey,
-    bundle_id: Pubkey,
-    auction_id: Pubkey,
-    context_length_tier: RequestTier,
-    expiry_duration_tier: RequestTier,
-    #[cfg_attr(not(test), allow(dead_code))]
-    blockhash_source: LocalHarnessBlockhashSource,
-    #[cfg_attr(not(test), allow(dead_code))]
-    blockhash_acquisition_micros: u64,
-}
-
 fn cached_blockhash_from_block_meta(
     block: &SubscribeUpdateBlockMeta,
 ) -> Result<CachedRecentBlockhash, String> {
@@ -247,40 +217,6 @@ async fn wait_for_cached_blockhash(
             }
 
             if let Some(cached) = rx.borrow().clone() {
-                return Some(cached);
-            }
-        }
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-#[cfg(test)]
-async fn wait_for_cached_blockhash_at_or_above_slot(
-    mut rx: watch::Receiver<Option<CachedRecentBlockhash>>,
-    timeout_duration: Duration,
-    minimum_slot: u64,
-) -> Option<CachedRecentBlockhash> {
-    if let Some(cached) = rx
-        .borrow()
-        .clone()
-        .filter(|cached| cached.slot >= minimum_slot)
-    {
-        return Some(cached);
-    }
-
-    timeout(timeout_duration, async move {
-        loop {
-            if rx.changed().await.is_err() {
-                return None;
-            }
-
-            if let Some(cached) = rx
-                .borrow()
-                .clone()
-                .filter(|cached| cached.slot >= minimum_slot)
-            {
                 return Some(cached);
             }
         }
@@ -924,36 +860,16 @@ impl AuctionClient {
         self.yellowstone_client.clone().0
     }
 
-    fn current_cached_recent_blockhash(&self) -> Option<CachedRecentBlockhash> {
-        self.recent_blockhash_rx.borrow().clone()
-    }
-
-    #[cfg(test)]
-    async fn wait_for_cached_recent_blockhash_at_or_above_slot(
-        &self,
-        minimum_slot: u64,
-        timeout_duration: Duration,
-    ) -> Option<CachedRecentBlockhash> {
-        wait_for_cached_blockhash_at_or_above_slot(
-            self.recent_blockhash_rx.clone(),
-            timeout_duration,
-            minimum_slot,
-        )
-        .await
-    }
-
-    async fn get_recent_blockhash_cached_with_source(
-        &self,
-    ) -> Result<(Hash, LocalHarnessBlockhashSource), Error> {
-        if let Some(cached) = self.current_cached_recent_blockhash() {
-            return Ok((cached.blockhash, LocalHarnessBlockhashSource::Cache));
+    pub async fn get_recent_blockhash_cached(&self) -> Result<Hash, Error> {
+        if let Some(cached) = self.recent_blockhash_rx.borrow().clone() {
+            return Ok(cached.blockhash);
         }
 
         if let Some(cached) =
             wait_for_cached_blockhash(self.recent_blockhash_rx.clone(), Duration::from_millis(500))
                 .await
         {
-            return Ok((cached.blockhash, LocalHarnessBlockhashSource::Cache));
+            return Ok(cached.blockhash);
         }
 
         tracing::warn!(
@@ -962,14 +878,8 @@ impl AuctionClient {
         self.rpc_client
             .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
             .await
-            .map(|(blockhash, _)| (blockhash, LocalHarnessBlockhashSource::RpcFallback))
-            .map_err(Into::into)
-    }
-
-    pub async fn get_recent_blockhash_cached(&self) -> Result<Hash, Error> {
-        self.get_recent_blockhash_cached_with_source()
-            .await
             .map(|(blockhash, _)| blockhash)
+            .map_err(Into::into)
     }
 
     pub async fn get_bundle_registry_cached(
@@ -1714,18 +1624,29 @@ async fn wait_for_job_request_to_complete(
 }
 
 /// Submits a job request and waits for the corresponding auction, returning the metadata
-/// associated with the resulting job request and freshly created auction.
+/// associated with the resulting job, auction, and connection information.
 #[instrument(skip_all)]
-async fn submit_job_until_auction_created(
+pub async fn run_auction_and_get_data(
     args: SubmitJobArgs,
     self_private_key: Option<[u8; 32]>,
     lifecycle_tx: UnboundedSender<Result<StreamingResponse, run::Error>>,
-) -> Result<SubmittedJobRequest, crate::run::Error> {
+) -> Result<RunAuction, crate::run::Error> {
+    tracing::debug!("Running auction client flow.");
+
+    let mut end_to_end_run_auction = Some(
+        RUN_AUCTION_TIMINGS
+            .with_label_values(&["e2e"])
+            .start_timer(),
+    );
+
     let client = args.client.clone();
+    // Read the prompt from stdin
     if args.inference_args.messages.is_empty() {
         tracing::error!(?args, "No prompt provided");
         return Err(crate::run::Error::InvalidInput);
     }
+    // TODO: this needs to be added to the auction TX's inputs when the state has been updated to
+    // support that.
     let prompt_hash = Sha256::digest(&serde_json::to_string(&args.inference_args.messages)?);
     tracing::info!("Prompt hash: {}", BASE64_STANDARD.encode(prompt_hash));
     let prompt_len = tokenizer::glm_chat(
@@ -1780,9 +1701,9 @@ async fn submit_job_until_auction_created(
             shared_secret.to_bytes(),
             Iv::new(iv),
         )?);
-        (encrypted_hash_output, Some(iv))
+        (encrypted_hash_output, iv)
     } else {
-        (input_hash, None)
+        (input_hash, Default::default())
     };
 
     let auction_lamports = {
@@ -1812,31 +1733,14 @@ async fn submit_job_until_auction_created(
     let max_output_tokens = 100;
     let retry_client = client.clone();
     let stream_tx_auction = lifecycle_tx.clone();
-    let (
-        sig,
-        bundle_id,
-        auction_id,
-        job_request_key,
-        blockhash_source,
-        blockhash_acquisition_micros,
-    ) = retry(
+    let (sig, bundle_id, auction_id, job_request_key) = retry(
         |attempt, err| {
             tracing::warn!("Error submitting job request (attempt: {attempt}): {err}");
             //tokio::time::sleep(Duration::from_millis(500))
             async {}
         },
         1,
-        async move || -> Result<
-            (
-                Signature,
-                Pubkey,
-                Pubkey,
-                Pubkey,
-                LocalHarnessBlockhashSource,
-                u64,
-            ),
-            crate::run::Error,
-        > {
+        async move || -> Result<(Signature, Pubkey, Pubkey, Pubkey), crate::run::Error> {
             let bundle = {
                 let _timer = RPC_CLIENT_TIMINGS
                     .with_label_values(&["get_latest_bundle"])
@@ -1866,7 +1770,7 @@ async fn submit_job_until_auction_created(
             let ix = request_job(
                 args.payer_keypair.pubkey(),
                 input_hash,
-                input_hash_iv,
+                args.encrypt_with_client_publickey.map(|_| input_hash_iv),
                 seed.to_bytes(),
                 prompt_len,
                 max_output_tokens,
@@ -1891,22 +1795,14 @@ async fn submit_job_until_auction_created(
                 let _timer = RPC_CLIENT_TIMINGS
                     .with_label_values(&["get_latest_blockhash"])
                     .start_timer();
-                let acquisition_started = std::time::Instant::now();
-                let (blockhash, source) = retry_client
-                    .get_recent_blockhash_cached_with_source()
-                    .await?;
-                (
-                    blockhash,
-                    source,
-                    acquisition_started.elapsed().as_micros() as u64,
-                )
+                retry_client.get_recent_blockhash_cached().await?
             };
             let tx = VersionedTransaction::try_new(
                 VersionedMessage::V0(Message::try_compile(
                     &payer_key,
                     &[ix],
                     &[],
-                    recent_blockhash.0,
+                    recent_blockhash,
                 )?),
                 &[&args.payer_keypair],
             )?;
@@ -2017,59 +1913,13 @@ async fn submit_job_until_auction_created(
                 job_request_id = job_request_id,
                 "Auction for bundle ({bundle_id}) is {auction_id}"
             );
-            Ok((
-                sig,
-                bundle_id,
-                auction_id,
-                job_request_key,
-                recent_blockhash.1,
-                recent_blockhash.2,
-            ))
+            Ok((sig, bundle_id, auction_id, job_request_key))
         },
     )
     .instrument(info_span!("job_request_retry_loop"))
     .await?;
 
     tracing::info!("Sent job request: {job_request_key} with signature: {sig}",);
-
-    Ok(SubmittedJobRequest {
-        signature: sig,
-        job_request_id: job_request_key,
-        bundle_id,
-        auction_id,
-        context_length_tier,
-        expiry_duration_tier,
-        blockhash_source,
-        blockhash_acquisition_micros,
-    })
-}
-
-/// Submits a job request and waits for the corresponding auction, returning the metadata
-/// associated with the resulting job, auction, and connection information.
-#[instrument(skip_all)]
-pub async fn run_auction_and_get_data(
-    args: SubmitJobArgs,
-    self_private_key: Option<[u8; 32]>,
-    lifecycle_tx: UnboundedSender<Result<StreamingResponse, run::Error>>,
-) -> Result<RunAuction, crate::run::Error> {
-    tracing::debug!("Running auction client flow.");
-
-    let mut end_to_end_run_auction = Some(
-        RUN_AUCTION_TIMINGS
-            .with_label_values(&["e2e"])
-            .start_timer(),
-    );
-
-    let client = args.client.clone();
-    let inference_args = args.inference_args.clone();
-    let SubmittedJobRequest {
-        bundle_id,
-        auction_id,
-        job_request_id: job_request_key,
-        context_length_tier,
-        expiry_duration_tier,
-        ..
-    } = submit_job_until_auction_created(args, self_private_key, lifecycle_tx.clone()).await?;
 
     let bids_handle = tokio::spawn(
         watch_bids(
@@ -2146,7 +1996,7 @@ pub async fn run_auction_and_get_data(
     tracing::debug!(data_ip = %data_ip, data_port = data_port);
     let inference_request = InferenceRequest {
         request_id: job_request_key.to_string(),
-        args: inference_args,
+        args: args.inference_args,
         slot: Some(auction.expiry_slot + 1),
     };
 
@@ -2449,142 +2299,8 @@ async fn submit_job_sync<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{InferenceArgs, InferenceMessage, MessageContent, SubmitJobArgs};
     use crate::ID;
-    use futures_util::stream;
-    use serde::Serialize;
-    use solana_sdk::signature::read_keypair_file;
-    use std::collections::BTreeMap;
-    use std::env;
-    use std::fs::File;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
-
-    const DEFAULT_LOCAL_RPC_URL: &str = "http://127.0.0.1:8899";
-    const DEFAULT_LOCAL_YELLOWSTONE_URL: &str = "http://127.0.0.1:10000";
-
-    #[derive(Clone, Debug)]
-    struct LocalHarnessConfig {
-        rpc_url: String,
-        yellowstone_url: String,
-        payer_keypair_path: PathBuf,
-        request_count: usize,
-        concurrency: usize,
-        additional_bundles: Option<u64>,
-        max_price: u64,
-        results_json_path: Option<PathBuf>,
-    }
-
-    #[derive(Debug, Serialize)]
-    struct LocalHarnessLatencySummary {
-        sample_count: usize,
-        p50_micros: Option<u64>,
-        p95_micros: Option<u64>,
-        p99_micros: Option<u64>,
-    }
-
-    #[derive(Debug, Serialize)]
-    struct LocalHarnessRunSummary {
-        requests_attempted: usize,
-        requests_succeeded: usize,
-        requests_failed: usize,
-        concurrency: usize,
-        block_not_available_yet_count: usize,
-        other_error_count: usize,
-        first_blocking_error: Option<String>,
-        keep_cache_warm_alive: bool,
-        teardown_cancelled: bool,
-        blockhash_source_counts: BTreeMap<String, usize>,
-        blockhash_acquisition_latency_micros: LocalHarnessLatencySummary,
-        request_latency_micros: LocalHarnessLatencySummary,
-        blockhash_acquisition_latency_samples_micros: Vec<u64>,
-        request_latency_samples_micros: Vec<u64>,
-    }
-
-    #[derive(Debug)]
-    struct LocalHarnessRequestOutcome {
-        request_latency_micros: u64,
-        result: Result<SubmittedJobRequest, crate::run::Error>,
-    }
-
-    fn require_local_harness_env(name: &str) -> String {
-        env::var(name).unwrap_or_else(|_| panic!("{name} must be set for the local harness test"))
-    }
-
-    impl LocalHarnessConfig {
-        fn from_env() -> Self {
-            Self {
-                rpc_url: env::var("AMBIENT_LOCAL_RPC_URL")
-                    .unwrap_or_else(|_| DEFAULT_LOCAL_RPC_URL.to_string()),
-                yellowstone_url: env::var("AMBIENT_LOCAL_YELLOWSTONE_URL")
-                    .unwrap_or_else(|_| DEFAULT_LOCAL_YELLOWSTONE_URL.to_string()),
-                payer_keypair_path: PathBuf::from(require_local_harness_env(
-                    "AMBIENT_LOCAL_PAYER_KEYPAIR",
-                )),
-                request_count: env::var("AMBIENT_LOCAL_REQUESTS")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(50),
-                concurrency: env::var("AMBIENT_LOCAL_CONCURRENCY")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(5),
-                additional_bundles: env::var("AMBIENT_LOCAL_ADDITIONAL_BUNDLES")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .or(Some(8)),
-                max_price: env::var("AMBIENT_LOCAL_MAX_PRICE")
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(100),
-                results_json_path: env::var("AMBIENT_LOCAL_RESULTS_JSON")
-                    .ok()
-                    .map(PathBuf::from),
-            }
-        }
-    }
-
-    fn percentile(sorted_samples: &[u64], numerator: usize, denominator: usize) -> Option<u64> {
-        if sorted_samples.is_empty() {
-            return None;
-        }
-
-        let last_index = sorted_samples.len() - 1;
-        let index = (last_index * numerator).div_ceil(denominator);
-        sorted_samples.get(index).copied()
-    }
-
-    fn summarize_latency(samples: &[u64]) -> LocalHarnessLatencySummary {
-        let mut sorted_samples = samples.to_vec();
-        sorted_samples.sort_unstable();
-        LocalHarnessLatencySummary {
-            sample_count: sorted_samples.len(),
-            p50_micros: percentile(&sorted_samples, 50, 100),
-            p95_micros: percentile(&sorted_samples, 95, 100),
-            p99_micros: percentile(&sorted_samples, 99, 100),
-        }
-    }
-
-    fn maybe_write_local_harness_summary(summary: &LocalHarnessRunSummary, path: Option<&PathBuf>) {
-        let Some(path) = path else {
-            return;
-        };
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_else(|error| {
-                panic!(
-                    "failed to create parent directory for {}: {error}",
-                    path.display()
-                )
-            });
-        }
-
-        let file = File::create(path)
-            .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
-        serde_json::to_writer_pretty(file, summary)
-            .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
-    }
 
     #[test]
     fn block_meta_update_parses_and_computes_cached_value() {
@@ -2722,257 +2438,6 @@ mod tests {
                 if message
                     == "Yellowstone stream for recent blockhash cache ended unexpectedly."
         ));
-    }
-
-    async fn force_processed_block(client: &AuctionClient) -> Result<u64, crate::run::Error> {
-        let ix = solana_system_interface::instruction::transfer(
-            &client.keypair.pubkey(),
-            &client.keypair.pubkey(),
-            1,
-        );
-        let recent_blockhash = client
-            .rpc_client
-            .get_latest_blockhash_with_commitment(CommitmentConfig::processed())
-            .await?
-            .0;
-        let tx = Transaction::new_signed_with_payer(
-            &[ix],
-            Some(&client.keypair.pubkey()),
-            &[&client.keypair],
-            recent_blockhash,
-        );
-
-        client
-            .rpc_client
-            .send_and_confirm_transaction_with_spinner_and_config(
-                &tx,
-                CommitmentConfig::processed(),
-                RpcSendTransactionConfig {
-                    skip_preflight: true,
-                    preflight_commitment: Some(CommitmentLevel::Processed),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        client
-            .rpc_client
-            .get_slot_with_commitment(CommitmentConfig::processed())
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn warm_recent_blockhash_cache_for_local_test(
-        client: Arc<AuctionClient>,
-    ) -> Result<u64, crate::run::Error> {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
-        let minimum_slot = force_processed_block(&client).await?;
-        client
-            .wait_for_cached_recent_blockhash_at_or_above_slot(
-                minimum_slot,
-                Duration::from_secs(10),
-            )
-            .await
-            .ok_or_else(|| {
-                crate::run::Error::Internal(format!(
-                    "Timed out waiting for cached blockhash slot to reach at least {minimum_slot}."
-                ))
-            })?;
-
-        Ok(minimum_slot)
-    }
-
-    async fn submit_local_request_until_auction_created(
-        client: Arc<AuctionClient>,
-        payer: Arc<Keypair>,
-        config: &LocalHarnessConfig,
-        prompt: String,
-    ) -> LocalHarnessRequestOutcome {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Result<StreamingResponse, _>>();
-        let args = SubmitJobArgs {
-            payer_keypair: payer,
-            max_price: config.max_price,
-            max_price_per_output_token: 55,
-            client,
-            additional_bundles: config.additional_bundles,
-            encrypt_with_client_publickey: None,
-            inference_args: InferenceArgs {
-                stream: Some(false),
-                messages: vec![InferenceMessage::User {
-                    content: Some(MessageContent::Text(prompt)),
-                }],
-                ..Default::default()
-            },
-            duration_tier: Some(RequestTier::Eco),
-            context_tier_override: Some(RequestTier::Eco),
-            input_data_account: None,
-            reclaim: Some(false),
-        };
-
-        let started = Instant::now();
-        let result = submit_job_until_auction_created(args, None, tx).await;
-
-        LocalHarnessRequestOutcome {
-            request_latency_micros: started.elapsed().as_micros() as u64,
-            result,
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a local validator stack with Yellowstone running"]
-    async fn request_submission_uses_cache_backed_blockhash_under_load_local() {
-        let config = LocalHarnessConfig::from_env();
-        let payer = Arc::new(
-            read_keypair_file(&config.payer_keypair_path)
-                .expect("local harness payer keypair should be readable"),
-        );
-        let client = Arc::new(
-            AuctionClient::new(
-                ID,
-                config.rpc_url.clone(),
-                Some(config.payer_keypair_path.clone()),
-                Pubkey::default(),
-                None,
-                config.yellowstone_url.clone(),
-            )
-            .await
-            .expect("local harness auction client should initialize"),
-        );
-
-        let keep_cache_warm_handle = tokio::spawn({
-            let client = client.clone();
-            async move { client.keep_cache_warm().await }
-        });
-
-        let warm_slot = warm_recent_blockhash_cache_for_local_test(client.clone())
-            .await
-            .expect("recent blockhash cache should warm after forcing a processed block");
-        let keep_cache_warm_alive_before_load = !keep_cache_warm_handle.is_finished();
-
-        let cached = client
-            .current_cached_recent_blockhash()
-            .expect("cache should be populated after warmup");
-        assert!(
-            cached.slot >= warm_slot,
-            "cache warmup used a stale slot: cached={} warm_slot={warm_slot}",
-            cached.slot
-        );
-
-        let results = stream::iter(0..config.request_count)
-            .map(|index| {
-                let client = client.clone();
-                let payer = payer.clone();
-                let config = config.clone();
-                async move {
-                    submit_local_request_until_auction_created(
-                        client,
-                        payer,
-                        &config,
-                        format!("local blockhash cache load test request {index}"),
-                    )
-                    .await
-                }
-            })
-            .buffer_unordered(config.concurrency)
-            .collect::<Vec<_>>()
-            .await;
-
-        let keep_cache_warm_alive_during_load = !keep_cache_warm_handle.is_finished();
-
-        let mut requests_succeeded = 0usize;
-        let mut requests_failed = 0usize;
-        let mut block_not_available_yet_count = 0usize;
-        let mut other_error_count = 0usize;
-        let mut first_blocking_error = None;
-        let mut blockhash_source_counts = BTreeMap::new();
-        let mut blockhash_latency_samples = Vec::new();
-        let mut request_latency_samples = Vec::with_capacity(results.len());
-
-        for outcome in results {
-            request_latency_samples.push(outcome.request_latency_micros);
-            match outcome.result {
-                Ok(submitted) => {
-                    requests_succeeded += 1;
-                    *blockhash_source_counts
-                        .entry(submitted.blockhash_source.as_str().to_string())
-                        .or_insert(0) += 1;
-                    blockhash_latency_samples.push(submitted.blockhash_acquisition_micros);
-                }
-                Err(error) => {
-                    requests_failed += 1;
-                    let message = error.to_string();
-                    if message.contains("block is not available yet") {
-                        block_not_available_yet_count += 1;
-                    } else {
-                        other_error_count += 1;
-                    }
-                    if first_blocking_error.is_none() {
-                        first_blocking_error = Some(message);
-                    }
-                }
-            }
-        }
-
-        keep_cache_warm_handle.abort();
-        let abort_result = keep_cache_warm_handle.await;
-        let teardown_cancelled = matches!(abort_result, Err(ref error) if error.is_cancelled());
-        let keep_cache_warm_alive =
-            keep_cache_warm_alive_before_load && keep_cache_warm_alive_during_load;
-        let summary = LocalHarnessRunSummary {
-            requests_attempted: config.request_count,
-            requests_succeeded,
-            requests_failed,
-            concurrency: config.concurrency,
-            block_not_available_yet_count,
-            other_error_count,
-            first_blocking_error: first_blocking_error.clone(),
-            keep_cache_warm_alive,
-            teardown_cancelled,
-            blockhash_source_counts: blockhash_source_counts.clone(),
-            blockhash_acquisition_latency_micros: summarize_latency(&blockhash_latency_samples),
-            request_latency_micros: summarize_latency(&request_latency_samples),
-            blockhash_acquisition_latency_samples_micros: blockhash_latency_samples,
-            request_latency_samples_micros: request_latency_samples,
-        };
-        maybe_write_local_harness_summary(&summary, config.results_json_path.as_ref());
-
-        assert!(
-            keep_cache_warm_alive,
-            "keep_cache_warm exited before or during the load test"
-        );
-        assert!(
-            teardown_cancelled,
-            "expected keep_cache_warm to be cancelled during teardown, got {abort_result:?}"
-        );
-        assert_eq!(
-            summary.block_not_available_yet_count, 0,
-            "load test still hit Yellowstone unary blockhash failures: {:?}",
-            summary.first_blocking_error
-        );
-        assert_eq!(
-            summary.requests_failed, 0,
-            "local request submission load test failed: {:?}",
-            summary.first_blocking_error
-        );
-        assert_eq!(
-            summary
-                .blockhash_source_counts
-                .get(LocalHarnessBlockhashSource::RpcFallback.as_str())
-                .copied()
-                .unwrap_or(0),
-            0,
-            "local request submission load test used the RPC blockhash fallback"
-        );
-        assert!(
-            summary
-                .blockhash_source_counts
-                .get(LocalHarnessBlockhashSource::Cache.as_str())
-                .copied()
-                .unwrap_or(0)
-                > 0,
-            "local request submission load test did not record any cache-backed blockhash reads"
-        );
     }
 
     #[test]
