@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use anyhow::{anyhow, bail, Context, Result};
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::{Auction, BundleRegistry, JobRequest, RequestTier, BUNDLE_REGISTRY_SEED};
 use ambient_auction_client::sdk::request_job;
@@ -8,6 +7,7 @@ use ambient_auction_client::ID as AUCTION_PROGRAM;
 use ambient_auction_listener::error::Error as ListenerError;
 use ambient_auction_listener::listener::AuctionClient;
 use ambient_auction_listener::ID as LISTENER_PROGRAM_ID;
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -149,7 +149,13 @@ impl ValidatorStack {
             .arg("-r")
             .arg(rpc_url)
             .arg(&payer_keypair)
-            .env("CARGO_TARGET_DIR", run_dir.join("init-bundles-target"))
+            .env(
+                "CARGO_TARGET_DIR",
+                repo_paths
+                    .auction_listener_root
+                    .join("target")
+                    .join("harness-init-bundles-target"),
+            )
             .stdout(Stdio::from(init_bundles_stdout))
             .stderr(Stdio::from(init_bundles_stderr))
             .status()
@@ -226,6 +232,8 @@ impl BlockhashSource {
 pub struct ValidationConfig {
     pub request_count: usize,
     pub concurrency: usize,
+    pub job_request_timeout_secs: u64,
+    pub auction_timeout_secs: u64,
     pub additional_bundles: Option<u64>,
     pub max_price: u64,
     pub max_price_per_output_token: u64,
@@ -470,13 +478,8 @@ pub async fn run_cache_validation(
     config: ValidationConfig,
     fallback_counter: FallbackWarningCounter,
 ) -> Result<ValidationSummary> {
-    run_validation_with_blockhash_source(
-        client,
-        config,
-        fallback_counter,
-        BlockhashSource::Cache,
-    )
-    .await
+    run_validation_with_blockhash_source(client, config, fallback_counter, BlockhashSource::Cache)
+        .await
 }
 
 pub async fn run_validation_with_blockhash_source(
@@ -500,14 +503,8 @@ pub async fn run_validation_with_blockhash_source(
             let config = config.clone();
             let workload_context = workload_context.clone();
             async move {
-                run_single_request(
-                    index,
-                    client,
-                    &config,
-                    &workload_context,
-                    blockhash_source,
-                )
-                .await
+                run_single_request(index, client, &config, &workload_context, blockhash_source)
+                    .await
             }
         })
         .buffer_unordered(config.concurrency)
@@ -675,7 +672,11 @@ async fn run_single_request(
     let (ready_tx, ready_rx) = oneshot::channel();
     let auction_waiter = tokio::spawn({
         let client = client.clone();
-        async move { client.wait_for_bundle_to_be_auctioned(bundle, ready_tx).await }
+        async move {
+            client
+                .wait_for_bundle_to_be_auctioned(bundle, ready_tx)
+                .await
+        }
     });
     ready_rx
         .await
@@ -714,8 +715,17 @@ async fn run_single_request(
         return Err(anyhow!("failed to send request transaction: {error}"));
     }
 
-    wait_for_job_request_account(&client, job_request_key, Duration::from_secs(20)).await?;
-    wait_for_auction(auction_waiter).await?;
+    wait_for_job_request_account(
+        &client,
+        job_request_key,
+        Duration::from_secs(config.job_request_timeout_secs),
+    )
+    .await?;
+    wait_for_auction(
+        auction_waiter,
+        Duration::from_secs(config.auction_timeout_secs),
+    )
+    .await?;
 
     Ok(RequestOutcome {
         blockhash_latency_micros,
@@ -735,7 +745,9 @@ async fn request_blockhash(
         BlockhashSource::YellowstoneUnary => {
             let response = client
                 .yellowstone_client()
-                .get_latest_blockhash(Some(yellowstone_grpc_proto::geyser::CommitmentLevel::Processed))
+                .get_latest_blockhash(Some(
+                    yellowstone_grpc_proto::geyser::CommitmentLevel::Processed,
+                ))
                 .await
                 .context("failed to fetch unary recent blockhash")?;
             solana_sdk::hash::Hash::from_str(&response.blockhash).with_context(|| {
@@ -811,15 +823,22 @@ async fn wait_for_job_request_account(
         match client.get_account::<JobRequest>(&job_request_key).await {
             Ok(job_request) => return Ok(job_request),
             Err(ListenerError::AccountNotExist(_, _)) => sleep(Duration::from_millis(50)).await,
-            Err(error) => return Err(anyhow!("failed to fetch JobRequest {job_request_key}: {error}")),
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to fetch JobRequest {job_request_key}: {error}"
+                ))
+            }
         }
     }
 
     bail!("timed out waiting for JobRequest account {job_request_key}")
 }
 
-async fn wait_for_auction(auction_waiter: JoinHandle<Result<Pubkey, ambient_auction_listener::run::Error>>) -> Result<Pubkey> {
-    tokio::time::timeout(Duration::from_secs(20), async move {
+async fn wait_for_auction(
+    auction_waiter: JoinHandle<Result<Pubkey, ambient_auction_listener::run::Error>>,
+    timeout_duration: Duration,
+) -> Result<Pubkey> {
+    tokio::time::timeout(timeout_duration, async move {
         auction_waiter
             .await
             .map_err(|error| anyhow!("bundle auction waiter panicked: {error}"))?
@@ -907,7 +926,9 @@ async fn run_unary_worker(
     while stop.load(Ordering::Relaxed) {
         stats.requests_attempted.fetch_add(1, Ordering::Relaxed);
         match yellowstone
-            .get_latest_blockhash(Some(yellowstone_grpc_proto::geyser::CommitmentLevel::Processed))
+            .get_latest_blockhash(Some(
+                yellowstone_grpc_proto::geyser::CommitmentLevel::Processed,
+            ))
             .await
         {
             Ok(response) => match solana_sdk::hash::Hash::from_str(&response.blockhash) {
@@ -1019,9 +1040,7 @@ fn build_unary_hammer_summary(stats: &UnaryHammerStats) -> UnaryHammerSummary {
     UnaryHammerSummary {
         requests_attempted: stats.requests_attempted.load(Ordering::Relaxed),
         success_count: stats.success_count.load(Ordering::Relaxed),
-        block_not_available_yet_count: stats
-            .block_not_available_yet_count
-            .load(Ordering::Relaxed),
+        block_not_available_yet_count: stats.block_not_available_yet_count.load(Ordering::Relaxed),
         other_error_count: stats.other_error_count.load(Ordering::Relaxed),
         parse_error_count: stats.parse_error_count.load(Ordering::Relaxed),
         slot_spam_success_count: stats.slot_spam_success_count.load(Ordering::Relaxed),
@@ -1110,7 +1129,9 @@ async fn wait_for_rpc(rpc_url: &str, timeout_duration: Duration) -> Result<()> {
 async fn wait_for_tcp(endpoint: &str, timeout_duration: Duration) -> Result<()> {
     let url = reqwest::Url::parse(endpoint).with_context(|| format!("invalid URL `{endpoint}`"))?;
     let host = url.host_str().context("Yellowstone URL missing host")?;
-    let port = url.port_or_known_default().context("Yellowstone URL missing port")?;
+    let port = url
+        .port_or_known_default()
+        .context("Yellowstone URL missing port")?;
     let socket_addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .with_context(|| format!("failed to parse {host}:{port}"))?;

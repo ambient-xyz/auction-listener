@@ -32,6 +32,10 @@ struct Args {
     request_count: usize,
     #[arg(long, default_value_t = 5)]
     concurrency: usize,
+    #[arg(long, default_value_t = 20)]
+    job_request_timeout_secs: u64,
+    #[arg(long, default_value_t = 20)]
+    auction_timeout_secs: u64,
     #[arg(long, default_value_t = 8)]
     additional_bundles: u64,
     #[arg(long, default_value_t = 100)]
@@ -80,6 +84,8 @@ async fn main() -> Result<()> {
     let config = ValidationConfig {
         request_count: args.request_count,
         concurrency: args.concurrency,
+        job_request_timeout_secs: args.job_request_timeout_secs,
+        auction_timeout_secs: args.auction_timeout_secs,
         additional_bundles: Some(args.additional_bundles),
         max_price: args.max_price,
         max_price_per_output_token: args.max_price_per_output_token,
@@ -139,7 +145,8 @@ fn install_tracing(fallback_counter: FallbackWarningCounter) -> Result<()> {
 }
 
 fn write_summary_json(path: &Path, summary: &ValidationSummary) -> Result<()> {
-    let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     serde_json::to_writer_pretty(file, summary)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
@@ -150,20 +157,33 @@ fn write_summary_markdown(
     summary: &ValidationSummary,
     validator: &ValidatorStack,
 ) -> Result<()> {
-    let mut file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     writeln!(file, "# Local Blockhash Cache Validation")?;
     writeln!(file)?;
     writeln!(file, "| Field | Value |")?;
     writeln!(file, "| --- | --- |")?;
-    writeln!(file, "| Requests attempted | {} |", summary.requests_attempted)?;
-    writeln!(file, "| Requests succeeded | {} |", summary.requests_succeeded)?;
+    writeln!(
+        file,
+        "| Requests attempted | {} |",
+        summary.requests_attempted
+    )?;
+    writeln!(
+        file,
+        "| Requests succeeded | {} |",
+        summary.requests_succeeded
+    )?;
     writeln!(file, "| Requests failed | {} |", summary.requests_failed)?;
     writeln!(
         file,
         "| `block is not available yet` count | {} |",
         summary.block_not_available_yet_count
     )?;
-    writeln!(file, "| Other error count | {} |", summary.other_error_count)?;
+    writeln!(
+        file,
+        "| Other error count | {} |",
+        summary.other_error_count
+    )?;
     writeln!(
         file,
         "| Fallback warning count | {} |",
@@ -188,10 +208,18 @@ fn write_summary_markdown(
         "Blockhash Acquisition Latency (micros)",
         &summary.blockhash_acquisition_latency_micros,
     )?;
-    write_latency_section(&mut file, "Request Latency (micros)", &summary.request_latency_micros)?;
+    write_latency_section(
+        &mut file,
+        "Request Latency (micros)",
+        &summary.request_latency_micros,
+    )?;
     writeln!(file, "## Logs")?;
     writeln!(file)?;
-    writeln!(file, "- Validator log: `{}`", validator.validator_log.display())?;
+    writeln!(
+        file,
+        "- Validator log: `{}`",
+        validator.validator_log.display()
+    )?;
     writeln!(
         file,
         "- init-bundles log: `{}`",

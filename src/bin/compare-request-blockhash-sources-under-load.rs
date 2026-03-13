@@ -40,6 +40,10 @@ struct Args {
     request_count: usize,
     #[arg(long, default_value_t = 50)]
     concurrency: usize,
+    #[arg(long, default_value_t = 20)]
+    job_request_timeout_secs: u64,
+    #[arg(long, default_value_t = 20)]
+    auction_timeout_secs: u64,
     #[arg(long, default_value_t = 8)]
     additional_bundles: u64,
     #[arg(long, default_value_t = 100)]
@@ -102,6 +106,8 @@ struct ComparisonSummary {
     rounds_per_mode: usize,
     requests_per_round: usize,
     concurrency: usize,
+    job_request_timeout_secs: u64,
+    auction_timeout_secs: u64,
     hammer_unary_concurrency: usize,
     hammer_slot_spam_concurrency: usize,
     hammer_transfer_lamports: u64,
@@ -149,6 +155,8 @@ async fn main() -> Result<()> {
     let validation_config = ValidationConfig {
         request_count: args.request_count,
         concurrency: args.concurrency,
+        job_request_timeout_secs: args.job_request_timeout_secs,
+        auction_timeout_secs: args.auction_timeout_secs,
         additional_bundles: Some(args.additional_bundles),
         max_price: args.max_price,
         max_price_per_output_token: args.max_price_per_output_token,
@@ -195,6 +203,8 @@ async fn main() -> Result<()> {
         rounds_per_mode: args.rounds,
         requests_per_round: args.request_count,
         concurrency: args.concurrency,
+        job_request_timeout_secs: args.job_request_timeout_secs,
+        auction_timeout_secs: args.auction_timeout_secs,
         hammer_unary_concurrency: args.hammer_unary_concurrency,
         hammer_slot_spam_concurrency: args.hammer_slot_spam_concurrency,
         hammer_transfer_lamports: args.hammer_transfer_lamports,
@@ -268,7 +278,11 @@ async fn run_mode(
     let aggregate = aggregate_mode(blockhash_source, &round_results);
     let background_hammer_block_not_available_yet_count = round_results
         .iter()
-        .map(|round| round.background_hammer_summary.block_not_available_yet_count)
+        .map(|round| {
+            round
+                .background_hammer_summary
+                .block_not_available_yet_count
+        })
         .sum();
     let background_hammer_other_error_count = round_results
         .iter()
@@ -298,7 +312,8 @@ async fn run_round(
     stress_timeout_secs: u64,
     fallback_counter: FallbackWarningCounter,
 ) -> Result<RoundResult> {
-    let mut validator = ValidatorStack::start(repo_paths, round_dir, rpc_url, yellowstone_url).await?;
+    let mut validator =
+        ValidatorStack::start(repo_paths, round_dir, rpc_url, yellowstone_url).await?;
     let validator_log = validator.validator_log.clone();
     let init_bundles_log = validator.init_bundles_log.clone();
     let stress_log = round_dir.join("stress.log");
@@ -348,7 +363,12 @@ async fn run_round(
         })?,
         &background_hammer_summary,
     )
-    .with_context(|| format!("failed to write {}", background_hammer_summary_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            background_hammer_summary_path.display()
+        )
+    })?;
 
     Ok(RoundResult {
         mode: blockhash_source.as_str().to_string(),
@@ -382,9 +402,8 @@ fn aggregate_mode(blockhash_source: BlockhashSource, rounds: &[RoundResult]) -> 
         block_not_available_yet_count += round.request_summary.block_not_available_yet_count;
         other_error_count += round.request_summary.other_error_count;
         fallback_warning_count += round.request_summary.fallback_warning_count;
-        blockhash_latencies.extend_from_slice(
-            &round.request_summary.blockhash_latency_samples_micros,
-        );
+        blockhash_latencies
+            .extend_from_slice(&round.request_summary.blockhash_latency_samples_micros);
         request_latencies.extend_from_slice(&round.request_summary.request_latency_samples_micros);
         if first_blocking_error.is_none() {
             first_blocking_error = round.request_summary.first_blocking_error.clone();
@@ -516,8 +535,22 @@ fn write_summary_markdown(path: &Path, summary: &ComparisonSummary) -> Result<()
     writeln!(file, "## Configuration")?;
     writeln!(file)?;
     writeln!(file, "- Rounds per mode: `{}`", summary.rounds_per_mode)?;
-    writeln!(file, "- Requests per round: `{}`", summary.requests_per_round)?;
+    writeln!(
+        file,
+        "- Requests per round: `{}`",
+        summary.requests_per_round
+    )?;
     writeln!(file, "- Concurrency: `{}`", summary.concurrency)?;
+    writeln!(
+        file,
+        "- JobRequest timeout: `{}`s",
+        summary.job_request_timeout_secs
+    )?;
+    writeln!(
+        file,
+        "- Auction timeout: `{}`s",
+        summary.auction_timeout_secs
+    )?;
     writeln!(
         file,
         "- Background hammer: unary `{}`, slot-spam `{}`, transfer lamports `{}`",
@@ -525,13 +558,20 @@ fn write_summary_markdown(path: &Path, summary: &ComparisonSummary) -> Result<()
         summary.hammer_slot_spam_concurrency,
         summary.hammer_transfer_lamports
     )?;
-    writeln!(file, "- stress-ng timeout: `{}`s", summary.stress_timeout_secs)?;
+    writeln!(
+        file,
+        "- stress-ng timeout: `{}`s",
+        summary.stress_timeout_secs
+    )?;
     writeln!(file)?;
 
     writeln!(file, "## Aggregate Comparison")?;
     writeln!(file)?;
     writeln!(file, "| Mode | Rounds | Attempted | Succeeded | Failed | `block is not available yet` | Other Errors | Fallback Warnings | Blockhash p50/p95/p99 (µs) | Request p50/p95/p99 (µs) | First Blocking Error | Result |")?;
-    writeln!(file, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |")?;
+    writeln!(
+        file,
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- |"
+    )?;
     write_aggregate_row(&mut file, &summary.unary.aggregate)?;
     write_aggregate_row(&mut file, &summary.cache.aggregate)?;
     writeln!(file)?;
@@ -539,8 +579,16 @@ fn write_summary_markdown(path: &Path, summary: &ComparisonSummary) -> Result<()
     writeln!(file, "## Round Results")?;
     writeln!(file)?;
     writeln!(file, "| Mode | Round | Attempted | Succeeded | Failed | `block is not available yet` | Other Errors | Fallback Warnings | Request Summary | Background Hammer |")?;
-    writeln!(file, "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |")?;
-    for round in summary.unary.rounds.iter().chain(summary.cache.rounds.iter()) {
+    writeln!(
+        file,
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+    )?;
+    for round in summary
+        .unary
+        .rounds
+        .iter()
+        .chain(summary.cache.rounds.iter())
+    {
         writeln!(
             file,
             "| {} | {} | {} | {} | {} | {} | {} | {} | `{}` | `{}` |",
@@ -560,10 +608,30 @@ fn write_summary_markdown(path: &Path, summary: &ComparisonSummary) -> Result<()
 
     writeln!(file, "## Background Hammer")?;
     writeln!(file)?;
-    writeln!(file, "- Unary-mode rounds background `block is not available yet`: `{}`", summary.unary.background_hammer_block_not_available_yet_count)?;
-    writeln!(file, "- Unary-mode rounds background other errors: `{}`", summary.unary.background_hammer_other_error_count)?;
-    writeln!(file, "- Cache-mode rounds background `block is not available yet`: `{}`", summary.cache.background_hammer_block_not_available_yet_count)?;
-    writeln!(file, "- Cache-mode rounds background other errors: `{}`", summary.cache.background_hammer_other_error_count)?;
+    writeln!(
+        file,
+        "- Unary-mode rounds background `block is not available yet`: `{}`",
+        summary
+            .unary
+            .background_hammer_block_not_available_yet_count
+    )?;
+    writeln!(
+        file,
+        "- Unary-mode rounds background other errors: `{}`",
+        summary.unary.background_hammer_other_error_count
+    )?;
+    writeln!(
+        file,
+        "- Cache-mode rounds background `block is not available yet`: `{}`",
+        summary
+            .cache
+            .background_hammer_block_not_available_yet_count
+    )?;
+    writeln!(
+        file,
+        "- Cache-mode rounds background other errors: `{}`",
+        summary.cache.background_hammer_other_error_count
+    )?;
     Ok(())
 }
 
