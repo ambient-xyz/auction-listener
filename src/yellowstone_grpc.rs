@@ -1,11 +1,13 @@
 use ambient_auction_api::Auction;
 use bytemuck::Pod;
+use futures_util::{Sink, SinkExt as _};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use yellowstone_grpc_client::{GeyserGrpcBuilderError, GeyserGrpcClient, GeyserGrpcClientError};
 use yellowstone_grpc_proto::geyser::{
     subscribe_request_filter_accounts_filter::Filter, subscribe_update::UpdateOneof::Account,
-    SubscribeRequestFilterAccounts, SubscribeRequestFilterAccountsFilter,
+    subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeRequestFilterAccountsFilter, SubscribeRequestPing, SubscribeUpdate,
     SubscribeUpdateAccountInfo,
 };
 
@@ -131,4 +133,22 @@ pub fn auction_update_request(
         commitment: Some(commitment.into()),
         ..Default::default()
     }
+}
+
+pub async fn reply_to_ping<S>(sink: &mut S, update: &SubscribeUpdate) -> Result<bool, String>
+where
+    S: Sink<SubscribeRequest> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    if matches!(update.update_oneof, Some(UpdateOneof::Ping(_))) {
+        sink.send(SubscribeRequest {
+            ping: Some(SubscribeRequestPing { id: 1 }),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }

@@ -84,7 +84,7 @@ use crate::run::{
     completion, encrypt_with_iv, retry, stream_completion, wait_for_verification, InferenceRequest,
     InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse, SubmitJobArgs,
 };
-use crate::yellowstone_grpc::{decode_account_info, CloneableGeyserGrpcClient};
+use crate::yellowstone_grpc::{decode_account_info, reply_to_ping, CloneableGeyserGrpcClient};
 use crate::{error::Error, run};
 use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use solana_sdk::pubkey::MAX_SEED_LEN;
@@ -417,7 +417,7 @@ async fn maintain_bundle_registry_cache(
     mut geyser: CloneableGeyserGrpcClient,
     cache: Arc<papaya::HashMap<Pubkey, BundleRegistry>>,
 ) -> Result<(), crate::run::Error> {
-    let (_, mut stream) = geyser
+    let (mut sink, mut stream) = geyser
         .0
         .subscribe_with_request(Some(SubscribeRequest {
             accounts: HashMap::from([(
@@ -451,6 +451,14 @@ async fn maintain_bundle_registry_cache(
                 )));
             }
         };
+
+        if reply_to_ping(&mut sink, &update)
+            .await
+            .map_err(|error| crate::run::Error::Internal(format!("Error replying to Yellowstone ping: {error}")))?
+        {
+            continue;
+        }
+
         let Some(UpdateOneof::Account(account)) = update.update_oneof else {
             continue;
         };
@@ -478,7 +486,7 @@ async fn maintain_recent_blockhash_cache(
     recent_blockhash_tx: watch::Sender<Option<CachedRecentBlockhash>>,
 ) -> Result<(), crate::run::Error> {
     tracing::info!("Starting recent blockhash cache subscription.");
-    let (_, mut stream) = geyser
+    let (mut sink, mut stream) = geyser
         .0
         .subscribe_with_request(Some(SubscribeRequest {
             blocks_meta: HashMap::from([(
@@ -506,6 +514,13 @@ async fn maintain_recent_blockhash_cache(
                 )));
             }
         };
+
+        if reply_to_ping(&mut sink, &update)
+            .await
+            .map_err(|error| crate::run::Error::Internal(format!("Error replying to Yellowstone ping: {error}")))?
+        {
+            continue;
+        }
 
         let Some(UpdateOneof::BlockMeta(block)) = update.update_oneof else {
             continue;
@@ -761,20 +776,40 @@ impl AuctionClient {
             };
             checks += 1;
             // Wait for an update from the event stream
-            let Some(Ok(update)) = subscription
+            let update = match subscription
                 .next()
                 .instrument(info_span!("wait_for_account_condition_update"))
                 .await
-            else {
-                tracing::warn!(
-                    "Subscription to account ({pubkey}) ended prematurely.",
-                    pubkey = pubkey
-                );
-                break Err(crate::run::Error::Internal(format!(
-                    "Condition never met for account ({pubkey}) of type ({})",
-                    type_name::<A>()
-                )));
+            {
+                Some(Ok(update)) => update,
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        ?error,
+                        "Subscription to account ({pubkey}) ended with an error.",
+                        pubkey = pubkey
+                    );
+                    break Err(crate::run::Error::Internal(format!(
+                        "Condition never met for account ({pubkey}) of type ({})",
+                        type_name::<A>()
+                    )));
+                }
+                None => {
+                    tracing::warn!(
+                        "Subscription to account ({pubkey}) ended prematurely.",
+                        pubkey = pubkey
+                    );
+                    break Err(crate::run::Error::Internal(format!(
+                        "Condition never met for account ({pubkey}) of type ({})",
+                        type_name::<A>()
+                    )));
+                }
             };
+            if reply_to_ping(&mut sink, &update)
+                .await
+                .map_err(|error| run::Error::Internal(format!("Error replying to Yellowstone ping: {error}")))?
+            {
+                continue;
+            }
             if let Some(updated_acct) = Self::decode_from_geyser::<A>(update, pubkey) {
                 // If the account decodes into the type we expect
                 acct = updated_acct;
@@ -1581,8 +1616,8 @@ async fn wait_for_job_request_to_complete(
 ) -> Result<JobRequest, crate::run::Error> {
     let mut yellowstone_client = retry_client.yellowstone_client();
     tracing::info!(?job_request_id, "Subscribing to transaction status");
-    let mut sub = yellowstone_client
-        .subscribe_once(SubscribeRequest {
+    let (mut sink, mut sub) = yellowstone_client
+        .subscribe_with_request(Some(SubscribeRequest {
             transactions_status: HashMap::from([(
                 format!("{job_request_id}-tx-status"),
                 SubscribeRequestFilterTransactions {
@@ -1610,7 +1645,7 @@ async fn wait_for_job_request_to_complete(
                 },
             )]),
             ..Default::default()
-        })
+        }))
         .await?;
     let mut job_request_timer = Some(
         RPC_CLIENT_TIMINGS
@@ -1648,6 +1683,12 @@ async fn wait_for_job_request_to_complete(
                 ));
             }
         };
+        if reply_to_ping(&mut sink, &update)
+            .await
+            .map_err(|error| crate::run::Error::Internal(format!("Error replying to Yellowstone ping: {error}")))?
+        {
+            continue;
+        }
         tracing::debug!(?update, "Received event from gRPC");
         // TODO(nap): change this to debug or remote
         // keyword: printline, debugging
@@ -1692,7 +1733,6 @@ async fn wait_for_job_request_to_complete(
                     "Job request transaction succeeded. Awaiting update to JobRequestAccount"
                 );
             }
-            Some(UpdateOneof::Ping(_)) => (),
             Some(UpdateOneof::Slot(slot))
                 if job_request.is_some()
                         // if the slot is at least the slot the job request was in
@@ -2124,7 +2164,7 @@ async fn watch_bids(
     auction_id: Pubkey,
 ) -> Result<(), crate::run::Error> {
     let mut geyser = client.clone().0;
-    let (_, mut stream) = geyser
+    let (mut sink, mut stream) = geyser
         .subscribe_with_request(Some(SubscribeRequest {
             accounts: HashMap::from([(
                 "listener-bid-cache".to_string(),
@@ -2154,7 +2194,18 @@ async fn watch_bids(
         }))
         .await?;
 
-    while let Some(Ok(upd)) = stream.next().await {
+    while let Some(upd) = stream.next().await {
+        let upd = upd.map_err(|error| {
+            crate::run::Error::Internal(format!(
+                "Error in Yellowstone bid subscription: {error}"
+            ))
+        })?;
+        if reply_to_ping(&mut sink, &upd)
+            .await
+            .map_err(|error| crate::run::Error::Internal(format!("Error replying to Yellowstone ping: {error}")))?
+        {
+            continue;
+        }
         let Some(UpdateOneof::Account(account)) = upd.update_oneof else {
             continue;
         };
