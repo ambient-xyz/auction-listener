@@ -1,8 +1,10 @@
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::instruction::{SubmitJobOutputArgs, SubmitValidationArgs};
 use ambient_auction_api::{
-    error::AuctionError, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
-    JobVerificationState, Metadata, RequestTier, PUBKEY_BYTES,
+    error::AuctionError, Auction, AuctionStatus, Bid, Config, InstructionBytes, JobRequest,
+    JobRequestStatus, JobVerificationState, MaybePubkey, Metadata, RequestJobArgs,
+    RequestTier, AUCTION_SEED, CONFIG_SEED, JOB_REQUEST_SEED, PUBKEY_BYTES,
+    REQUEST_BUNDLE_SEED,
 };
 use ambient_auction_api::{BundleRegistry, RevealBidArgs};
 use ambient_auction_api::{BundleStatus, BUNDLE_REGISTRY_SEED};
@@ -20,10 +22,12 @@ use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes};
 use solana_client::{
+    client_error::ClientErrorKind,
     nonblocking::rpc_client::RpcClient,
     rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
     rpc_filter::RpcFilterType,
 };
+use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::clock::MAX_RECENT_BLOCKHASHES;
 use solana_sdk::commitment_config::CommitmentLevel;
 use solana_sdk::hash::Hash;
@@ -40,6 +44,7 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
+use solana_sdk::system_program;
 use std::any::type_name;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -81,7 +86,6 @@ use crate::run::{
 };
 use crate::yellowstone_grpc::{decode_account_info, CloneableGeyserGrpcClient};
 use crate::{error::Error, run};
-use ambient_auction_client::sdk::request_job;
 use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use solana_sdk::pubkey::MAX_SEED_LEN;
 use std::sync::LazyLock;
@@ -142,6 +146,148 @@ static RPC_CLIENT_COUNTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestJobLayout {
+    Old,
+    New,
+}
+
+async fn detect_request_job_layout(rpc_client: &RpcClient) -> RequestJobLayout {
+    let (config_pubkey, _) = Pubkey::find_program_address(&[CONFIG_SEED], &AUCTION_PROGRAM);
+    match rpc_client.get_account(&config_pubkey).await {
+        Ok(account)
+            if account.owner == AUCTION_PROGRAM
+                && account.data.len() == Config::LEN
+                && bytemuck::try_from_bytes::<Config>(&account.data).is_ok() =>
+        {
+            RequestJobLayout::New
+        }
+        Ok(account) => {
+            tracing::warn!(
+                config_pubkey = %config_pubkey,
+                owner = %account.owner,
+                len = account.data.len(),
+                "auction config account present but unusable, falling back to old request_job layout"
+            );
+            RequestJobLayout::Old
+        }
+        Err(err) => {
+            let missing = matches!(err.kind, ClientErrorKind::RpcError(_));
+            if !missing {
+                tracing::warn!(
+                    config_pubkey = %config_pubkey,
+                    error = %err,
+                    "failed to probe auction config account, falling back to old request_job layout"
+                );
+            }
+            RequestJobLayout::Old
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_request_job_instruction(
+    authority: Pubkey,
+    input_hash: [u8; PUBKEY_BYTES],
+    input_hash_iv: Option<[u8; 16]>,
+    job_request_seed: [u8; MAX_SEED_LEN],
+    input_tokens: u64,
+    max_output_tokens: u64,
+    new_bundle_lamports: u64,
+    new_auction_lamports: u64,
+    bundle_key: Pubkey,
+    max_price_per_output_token: u64,
+    context_length_tier: RequestTier,
+    expiry_duration_tier: RequestTier,
+    input_data_account: Option<Pubkey>,
+    additional_bundles: Option<u64>,
+    layout: RequestJobLayout,
+) -> Instruction {
+    let context_tier_bytes = (context_length_tier as u64).to_le_bytes();
+    let duration_tier_bytes = (expiry_duration_tier as u64).to_le_bytes();
+
+    let seeds: [&[u8]; 2] = [AUCTION_SEED, &bundle_key.to_bytes()];
+    let (parent_auction_key, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+
+    let seeds: [&[u8]; 5] = [
+        JOB_REQUEST_SEED,
+        &context_tier_bytes,
+        &duration_tier_bytes,
+        &authority.to_bytes(),
+        &job_request_seed,
+    ];
+    let (job_request_key, bump) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+
+    let seeds: [&[u8]; 2] = [REQUEST_BUNDLE_SEED, &bundle_key.to_bytes()];
+    let (first_child_bundle, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+
+    let seeds: [&[u8]; 2] = [AUCTION_SEED, &first_child_bundle.to_bytes()];
+    let (first_child_auction, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+
+    let mut bundle_auction_pairs = vec![
+        AccountMeta::new(bundle_key, false),
+        AccountMeta::new(parent_auction_key, false),
+        AccountMeta::new(first_child_bundle, false),
+        AccountMeta::new(first_child_auction, false),
+    ];
+    let mut current_last = first_child_bundle;
+    for _ in 0..additional_bundles.unwrap_or(8) {
+        let seeds: [&[u8]; 2] = [REQUEST_BUNDLE_SEED, &current_last.to_bytes()];
+        let (next_bundle, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+        let seeds: [&[u8]; 2] = [AUCTION_SEED, &next_bundle.to_bytes()];
+        let (next_auction, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+        bundle_auction_pairs.push(AccountMeta::new(next_bundle, false));
+        bundle_auction_pairs.push(AccountMeta::new(next_auction, false));
+        current_last = next_bundle;
+    }
+    let seeds: [&[u8]; 2] = [REQUEST_BUNDLE_SEED, &current_last.to_bytes()];
+    let (last_bundle, _) = Pubkey::find_program_address(&seeds, &AUCTION_PROGRAM);
+
+    let (registry, _) = Pubkey::find_program_address(
+        &[
+            BUNDLE_REGISTRY_SEED,
+            context_tier_bytes.as_ref(),
+            duration_tier_bytes.as_ref(),
+        ],
+        &AUCTION_PROGRAM,
+    );
+
+    let mut accounts = vec![
+        AccountMeta::new(authority, true),
+        AccountMeta::new(job_request_key, false),
+        AccountMeta::new(registry, false),
+        AccountMeta::new(input_data_account.unwrap_or_default(), false),
+        AccountMeta::new_readonly(system_program::ID, false),
+    ];
+    if matches!(layout, RequestJobLayout::New) {
+        let (config_key, _) = Pubkey::find_program_address(&[CONFIG_SEED], &AUCTION_PROGRAM);
+        accounts.push(AccountMeta::new(config_key, false));
+    }
+    accounts.extend(bundle_auction_pairs);
+    accounts.push(AccountMeta::new(last_bundle, false));
+
+    let input_data_key: MaybePubkey = input_data_account.map(|key| key.to_bytes().into()).into();
+
+    Instruction {
+        program_id: AUCTION_PROGRAM,
+        data: RequestJobArgs {
+            max_price_per_output_token,
+            max_output_tokens,
+            authority: authority.to_bytes(),
+            input_hash,
+            input_hash_iv: input_hash_iv.unwrap_or_default(),
+            job_request_seed,
+            new_bundle_lamports,
+            input_tokens,
+            bump: bump.into(),
+            new_auction_lamports,
+            input_data_account: input_data_key,
+        }
+        .to_bytes(),
+        accounts,
+    }
+}
 
 static RECLAIM_JOB_TASKS: LazyLock<Gauge> = LazyLock::new(|| {
     register_gauge!(
@@ -702,7 +848,7 @@ impl AuctionClient {
                     .verification
                     .verifier_states
                     .iter()
-                    .filter(|s| **s == JobVerificationState::Completed)
+                    .filter(|s| **s == JobVerificationState::Completed.into())
                     .count();
 
                 tracing::debug!("Job status: {:?}", job_request.status);
@@ -1717,7 +1863,9 @@ pub async fn run_auction_and_get_data(
                     .await?
             };
             let seed = Keypair::new().pubkey();
-            let ix = request_job(
+            let request_job_layout = detect_request_job_layout(&retry_client.rpc_client).await;
+            tracing::debug!(?request_job_layout, "selected request_job instruction layout");
+            let ix = build_request_job_instruction(
                 args.payer_keypair.pubkey(),
                 input_hash,
                 args.encrypt_with_client_publickey.map(|_| input_hash_iv),
@@ -1732,6 +1880,7 @@ pub async fn run_auction_and_get_data(
                 expiry_duration_tier,
                 args.input_data_account,
                 args.additional_bundles,
+                request_job_layout,
             );
             ix.accounts.iter().enumerate().for_each(|(i, acct)| {
                 tracing::trace!("Account {i}: {}", acct.pubkey);
