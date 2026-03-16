@@ -1,11 +1,14 @@
 use ambient_auction_api::Auction;
 use bytemuck::Pod;
+use futures_util::{Sink, SinkExt as _};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use yellowstone_grpc_client::{GeyserGrpcBuilderError, GeyserGrpcClient, GeyserGrpcClientError};
+use yellowstone_grpc_proto::tonic::metadata::{errors::InvalidMetadataValue, AsciiMetadataValue};
 use yellowstone_grpc_proto::geyser::{
     subscribe_request_filter_accounts_filter::Filter, subscribe_update::UpdateOneof::Account,
-    SubscribeRequestFilterAccounts, SubscribeRequestFilterAccountsFilter,
+    subscribe_update::UpdateOneof, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeRequestFilterAccountsFilter, SubscribeRequestPing, SubscribeUpdate,
     SubscribeUpdateAccountInfo,
 };
 
@@ -19,6 +22,8 @@ pub enum YellowstoneGrpcError {
     Connection(#[from] yellowstone_grpc_proto::tonic::transport::Error),
     #[error("Yellowstone subscription error: {0}")]
     Subscription(#[from] yellowstone_grpc_proto::tonic::Status),
+    #[error("Yellowstone metadata error: {0}")]
+    Metadata(#[from] InvalidMetadataValue),
     #[error("Yellowstone decode error: {0}")]
     Decode(String),
 }
@@ -32,14 +37,24 @@ pub struct CloneableGeyserGrpcClient(
 
 impl CloneableGeyserGrpcClient {
     pub async fn new(url: String) -> Result<Self, YellowstoneGrpcError> {
+        Self::new_with_options(url, None, false).await
+    }
+
+    pub async fn new_with_options(
+        url: String,
+        x_token: Option<String>,
+        x_request_snapshot: bool,
+    ) -> Result<Self, YellowstoneGrpcError> {
         let endpoint =
             yellowstone_grpc_proto::tonic::transport::Endpoint::from_shared(url.clone())?;
 
         let channel = endpoint.connect().await?;
 
         let interceptor = yellowstone_grpc_client::InterceptorXToken {
-            x_token: None,
-            x_request_snapshot: false,
+            x_token: x_token
+                .map(AsciiMetadataValue::try_from)
+                .transpose()?,
+            x_request_snapshot,
         };
         let geyser = yellowstone_grpc_proto::geyser::geyser_client::GeyserClient::with_interceptor(
             channel.clone(),
@@ -131,4 +146,22 @@ pub fn auction_update_request(
         commitment: Some(commitment.into()),
         ..Default::default()
     }
+}
+
+pub async fn reply_to_ping<S>(sink: &mut S, update: &SubscribeUpdate) -> Result<bool, String>
+where
+    S: Sink<SubscribeRequest> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    if matches!(update.update_oneof, Some(UpdateOneof::Ping(_))) {
+        sink.send(SubscribeRequest {
+            ping: Some(SubscribeRequestPing { id: 1 }),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }

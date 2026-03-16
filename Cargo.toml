@@ -39,6 +39,11 @@ assets = [
         "target/release/mock-server",
         "usr/bin/",
         "755",
+    ],
+    [
+        "target/release/watch-bundles",
+        "usr/bin/",
+        "755",
     ]
 ]
 
@@ -56,8 +61,8 @@ num_enum = "0.7.3"
 solana-account-decoder-client-types = "=2.3.13"
 solana-client = "=2.3.13"
 solana-sdk = "=2.3.1"
-ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api",features = ["serde"] }
-ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client"}
+ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", features = ["serde"] }
+ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", features = ["global-config"] }
 itertools = "0.14"
 tokio = "1.45.0"
 tokio-stream = "0.1"
@@ -95,7 +100,5 @@ tokenizer = { git = "https://github.com/ambient-xyz/tokenizer" }
 solana-system-interface = { version = "1.0.0", features = ["bincode"] }
 lz4_flex = "0.11.5"
 papaya = "0.2.3"
-
-[features]
-default =[]
-global-config = ["ambient-auction-client/global-config"]
+time = { version = "0.3.41", features = ["formatting", "local-offset", "parsing", "serde"] }
+libc = "0.2"
