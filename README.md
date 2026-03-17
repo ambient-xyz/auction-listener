@@ -139,7 +139,7 @@ Used by:
 
 ### Bundle registry cache
 
-`AuctionClient::keep_cache_warm()` subscribes to `BundleRegistry` accounts and maintains a `papaya::HashMap` cache keyed by registry pubkey. This is used to quickly resolve the current `latest_bundle` for a given tier combination.
+`get_recent_blockhash_cached()` returns a fresh cached blockhash when available and otherwise falls back to confirmed RPC immediately. Call `AuctionClient::keep_cache_warm()` to keep both the `BundleRegistry` cache and recent blockhash cache updated from Yellowstone; it reconnects after Yellowstone stream errors instead of returning.
 
 ### Watching bids (layout-sensitive filter)
 
@@ -242,11 +242,6 @@ async fn main() -> anyhow::Result<()> {
         None,                             // vote authority keypair path (defaults to payer keypair)
         "http://localhost:10000".into(),  // yellowstone grpc url
     ).await?;
-
-    // Optional: keep bundle registry cache warm
-    tokio::spawn(async move {
-        let _ = client.keep_cache_warm().await;
-    });
 
     Ok(())
 }
