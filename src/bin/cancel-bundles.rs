@@ -58,17 +58,11 @@ async fn get_latest_bundle(
 }
 
 async fn cancel_bundles(payer: Keypair, client: &RpcClient) -> Result<(), String> {
-    let tiers = [
-        RequestTier::Eco,
-        RequestTier::Small,
-        RequestTier::Standard,
-        RequestTier::Pro,
-        RequestTier::Large,
-    ];
     let current_slot = client.get_slot().await.map_err(strerr)?;
 
     // create bundle for every tier combination
-    for (length_tier, duration_tier) in tiers.iter().cartesian_product(&tiers) {
+    for (length_tier, duration_tier) in RequestTier::ALL.iter().cartesian_product(&RequestTier::ALL)
+    {
         let (latest_bundle_key, bundle) =
             match get_latest_bundle(client, *length_tier, *duration_tier).await {
                 Ok(b) => b,
