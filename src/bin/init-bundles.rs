@@ -26,6 +26,13 @@ fn strerr<E: Display>(arg: E) -> String {
 }
 
 async fn initialize_bundle(client: &RpcClient, payer: &Keypair) -> Result<(), String> {
+    let tiers = [
+        RequestTier::Eco,
+        RequestTier::Small,
+        RequestTier::Standard,
+        RequestTier::Pro,
+        RequestTier::Large,
+    ];
     let bundle_lamports = client
         .get_minimum_balance_for_rent_exemption(RequestBundle::LEN)
         .await
@@ -36,7 +43,6 @@ async fn initialize_bundle(client: &RpcClient, payer: &Keypair) -> Result<(), St
         .map_err(strerr)?;
 
     eprintln!("Initializing all bundles...");
-    let tiers = vec![RequestTier::Eco, RequestTier::Standard, RequestTier::Pro];
     // create bundle for every tier combination
     for (length_tier, duration_tier) in tiers.iter().cartesian_product(&tiers) {
         let ix = ambient_auction_client::sdk::init_bundle(

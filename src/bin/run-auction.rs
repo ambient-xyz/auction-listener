@@ -40,8 +40,10 @@ impl ExitCondition {
 #[derive(ValueEnum, Clone, Copy, Debug)]
 enum RequestTier {
     Eco,
+    Small,
     Standard,
     Pro,
+    Large,
 }
 
 impl From<RequestTier> for ambient_auction_api::RequestTier {
@@ -49,8 +51,10 @@ impl From<RequestTier> for ambient_auction_api::RequestTier {
         use ambient_auction_api::RequestTier::*;
         match value {
             RequestTier::Eco => Eco,
+            RequestTier::Small => Small,
             RequestTier::Standard => Standard,
             RequestTier::Pro => Pro,
+            RequestTier::Large => Large,
         }
     }
 }
@@ -59,8 +63,10 @@ impl Display for RequestTier {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             RequestTier::Eco => "eco",
+            RequestTier::Small => "small",
             RequestTier::Standard => "standard",
             RequestTier::Pro => "pro",
+            RequestTier::Large => "large",
         })
     }
 }

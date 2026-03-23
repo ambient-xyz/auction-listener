@@ -58,7 +58,13 @@ async fn get_latest_bundle(
 }
 
 async fn cancel_bundles(payer: Keypair, client: &RpcClient) -> Result<(), String> {
-    let tiers = vec![RequestTier::Eco, RequestTier::Standard, RequestTier::Pro];
+    let tiers = [
+        RequestTier::Eco,
+        RequestTier::Small,
+        RequestTier::Standard,
+        RequestTier::Pro,
+        RequestTier::Large,
+    ];
     let current_slot = client.get_slot().await.map_err(strerr)?;
 
     // create bundle for every tier combination
