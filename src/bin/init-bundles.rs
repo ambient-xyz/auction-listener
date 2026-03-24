@@ -36,9 +36,9 @@ async fn initialize_bundle(client: &RpcClient, payer: &Keypair) -> Result<(), St
         .map_err(strerr)?;
 
     eprintln!("Initializing all bundles...");
-    let tiers = vec![RequestTier::Eco, RequestTier::Standard, RequestTier::Pro];
     // create bundle for every tier combination
-    for (length_tier, duration_tier) in tiers.iter().cartesian_product(&tiers) {
+    for (length_tier, duration_tier) in RequestTier::ALL.iter().cartesian_product(&RequestTier::ALL)
+    {
         let ix = ambient_auction_client::sdk::init_bundle(
             payer.pubkey(),
             *length_tier,
