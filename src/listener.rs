@@ -1,7 +1,7 @@
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::instruction::{SubmitJobOutputArgs, SubmitValidationArgs};
 use ambient_auction_api::{
-    error::AuctionError, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
+    error::AuctionError, AccountData, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
     JobVerificationState, Metadata, RequestTier, PUBKEY_BYTES,
 };
 use ambient_auction_api::{BundleRegistry, RevealBidArgs};
@@ -9,7 +9,6 @@ use ambient_auction_api::{BundleStatus, BUNDLE_REGISTRY_SEED};
 use ambient_auction_client::ID as AUCTION_PROGRAM;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use bytemuck::Pod;
 use futures_util::SinkExt as _;
 use futures_util::{Stream, StreamExt};
 use prometheus::register_gauge;
@@ -267,7 +266,7 @@ async fn maintain_bundle_registry_cache(
             continue;
         };
 
-        let Ok(registry) = bytemuck::try_pod_read_unaligned::<BundleRegistry>(&account.data) else {
+        let Ok(registry) = BundleRegistry::try_read_unaligned(&account.data) else {
             tracing::warn!("Failed to deserialize bundle registry");
             continue;
         };
@@ -566,7 +565,7 @@ impl AuctionClient {
     /// RPC subscription model of Solana / Ambient. Once the condition is true, `f` should return
     /// `Ok(Some(T))` where `T` is then returned in `Ok(T)` from this function. Note: this *can* block indefinitely if there are no account updates
     // TODO(nap): this should really return Result<Result<T, E>, YellowstoneError>
-    pub async fn wait_for_account_condition<A: Pod, T>(
+    pub async fn wait_for_account_condition<A: AccountData, T>(
         &self,
         pubkey: Pubkey,
         commitment: Option<yellowstone_grpc_proto::geyser::CommitmentLevel>,
@@ -650,7 +649,7 @@ impl AuctionClient {
         }
     }
 
-    fn decode_from_geyser<A: Pod>(update: SubscribeUpdate, pubkey: Pubkey) -> Option<A> {
+    fn decode_from_geyser<A: AccountData>(update: SubscribeUpdate, pubkey: Pubkey) -> Option<A> {
         update
             .update_oneof
             .and_then(|update| match update {
@@ -1263,7 +1262,7 @@ impl AuctionClient {
     /// Retrieves an account associated with `address` and decodes it into a type `A` using
     /// [`bytemuck`] using the specified commitment level. Defaults to `CommitmentConfig::processed()`
     #[instrument(level = "debug")]
-    pub async fn get_account_with_commitment<A: Pod>(
+    pub async fn get_account_with_commitment<A: AccountData>(
         &self,
         address: &Pubkey,
         commitment: Option<CommitmentConfig>,
@@ -1280,7 +1279,7 @@ impl AuctionClient {
     /// Retrieves an account associated with `address` and decodes it into a type `A` using
     /// [`bytemuck`] using the provided [`RpcAccountInfoConfig`].
     #[instrument]
-    pub async fn get_account_with_config<A: Pod>(
+    pub async fn get_account_with_config<A: AccountData>(
         &self,
         address: &Pubkey,
         config: RpcAccountInfoConfig,
@@ -1295,7 +1294,7 @@ impl AuctionClient {
             return Err(Error::AccountNotExist(std::any::type_name::<A>(), *address));
         };
 
-        bytemuck::try_pod_read_unaligned(&acct.data).map_err(|_| {
+        A::try_read_unaligned(&acct.data).map_err(|_| {
             Error::Custom(format!(
                 "Account ({address}) did not decode into expected type: {}",
                 type_name::<A>()
@@ -1306,7 +1305,7 @@ impl AuctionClient {
     /// Retrieves an account associated with `address` and decodes it into a type `A` using
     /// [`bytemuck`] using default options and a commitement level of "processed."
     #[instrument(level = "debug")]
-    pub async fn get_account<A: Pod>(&self, address: &Pubkey) -> Result<A, Error> {
+    pub async fn get_account<A: AccountData>(&self, address: &Pubkey) -> Result<A, Error> {
         let config = RpcAccountInfoConfig {
             encoding: Some(UiAccountEncoding::Base64Zstd),
             data_slice: None,
@@ -1317,7 +1316,7 @@ impl AuctionClient {
     }
 
     #[instrument(level = "debug")]
-    pub async fn get_account_with_slot<A: Pod>(
+    pub async fn get_account_with_slot<A: AccountData>(
         &self,
         address: &Pubkey,
         slot: Option<u64>,
@@ -1394,7 +1393,7 @@ impl AuctionClient {
             .filter_map(|(pubkey, acct)| {
                 Some((
                     *pubkey,
-                    bytemuck::try_pod_read_unaligned::<JobRequest>(&acct.data)
+                    JobRequest::try_read_unaligned(&acct.data)
                         .map_err(|_| {
                             Error::Custom(format!(
                                 "Account ({pubkey}) did not decode into expected type: {}",
@@ -1554,7 +1553,7 @@ async fn wait_for_job_request_to_complete(
         match update.update_oneof {
             Some(UpdateOneof::Account(a)) if a.account.is_some() => {
                 let acct = a.account.unwrap();
-                let j: JobRequest = bytemuck::try_pod_read_unaligned(&acct.data).map_err(|_| {
+                let j = JobRequest::try_read_unaligned(&acct.data).map_err(|_| {
                     Error::Custom(format!(
                         "Account ({job_request_id}) did not decode into expected type: JobRequset",
                     ))

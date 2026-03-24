@@ -99,3 +99,6 @@ papaya = "0.2.3"
 [features]
 default =[]
 global-config = ["ambient-auction-client/global-config"]
+
+[patch."https://github.com/ambient-xyz/auction-api"]
+ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", rev = "ab7310bb44537e1e446cbf3c4fdc868269e45aa1" }

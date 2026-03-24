@@ -1,4 +1,4 @@
-use ambient_auction_api::BundleRegistry;
+use ambient_auction_api::{AccountData, BundleRegistry};
 use ambient_auction_api::BUNDLE_REGISTRY_SEED;
 use ambient_auction_api::{RequestBundle, RequestTier};
 use ambient_auction_client::sdk;
@@ -47,13 +47,13 @@ async fn get_latest_bundle(
         &AUCTION_PROGRAM,
     );
     let registry = rpc_client.get_account(&registry).await.map_err(strerr)?;
-    let registry: &BundleRegistry = bytemuck::try_from_bytes(registry.data()).map_err(strerr)?;
+    let registry = BundleRegistry::try_from_bytes(registry.data()).map_err(strerr)?;
     let bundle_pubkey = Pubkey::new_from_array(registry.latest_bundle.inner());
     let bundle = rpc_client
         .get_account(&bundle_pubkey)
         .await
         .map_err(strerr)?;
-    let bundle: &RequestBundle = bytemuck::try_from_bytes(bundle.data()).map_err(strerr)?;
+    let bundle = RequestBundle::try_from_bytes(bundle.data()).map_err(strerr)?;
     Ok((bundle_pubkey, *bundle))
 }
 
