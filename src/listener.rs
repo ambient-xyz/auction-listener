@@ -1,19 +1,19 @@
 use ambient_auction_api::bundle::RequestBundle;
 use ambient_auction_api::instruction::{SubmitJobOutputArgs, SubmitValidationArgs};
 use ambient_auction_api::{
-    error::AuctionError, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
-    JobVerificationState, Metadata, RequestTier, PUBKEY_BYTES,
+    Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus, JobVerificationState, Metadata,
+    PUBKEY_BYTES, RequestTier, error::AuctionError,
 };
+use ambient_auction_api::{BUNDLE_REGISTRY_SEED, BundleStatus};
 use ambient_auction_api::{BundleRegistry, RevealBidArgs};
-use ambient_auction_api::{BundleStatus, BUNDLE_REGISTRY_SEED};
 use ambient_auction_client::ID as AUCTION_PROGRAM;
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use bytemuck::Pod;
 use futures_util::SinkExt as _;
 use futures_util::{Stream, StreamExt};
-use prometheus::register_gauge;
 use prometheus::Gauge;
+use prometheus::register_gauge;
 use rand::distr::SampleString as _;
 use sha2::{Digest, Sha256};
 use solana_account_decoder_client_types::UiAccountEncoding;
@@ -26,8 +26,8 @@ use solana_client::{
 };
 use solana_sdk::commitment_config::CommitmentLevel;
 use solana_sdk::hash::Hash;
-use solana_sdk::message::v0::Message;
 use solana_sdk::message::VersionedMessage;
+use solana_sdk::message::v0::Message;
 use solana_sdk::signature::Signature;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::{
@@ -49,7 +49,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug_span, info_span, instrument, Instrument as _, Span};
+use tracing::{Instrument as _, Span, debug_span, info_span, instrument};
 use wolf_crypto::buf::Iv;
 use x25519_dalek::{PublicKey, StaticSecret};
 use yellowstone_grpc_client::{GeyserGrpcClient, Interceptor};
@@ -77,13 +77,13 @@ use ambient_auction_client::sdk;
 
 use crate::error::Error::Custom;
 use crate::run::{
-    completion, encrypt_with_iv, retry, stream_completion, wait_for_verification, InferenceRequest,
-    InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse, SubmitJobArgs,
+    InferenceRequest, InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse,
+    SubmitJobArgs, completion, encrypt_with_iv, retry, stream_completion, wait_for_verification,
 };
-use crate::yellowstone_grpc::{decode_account_info, CloneableGeyserGrpcClient};
+use crate::yellowstone_grpc::{CloneableGeyserGrpcClient, decode_account_info};
 use crate::{error::Error, run};
 use ambient_auction_client::sdk::request_job;
-use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use solana_sdk::pubkey::MAX_SEED_LEN;
 use std::sync::LazyLock;
 
@@ -2004,7 +2004,7 @@ pub async fn run_auction_and_get_data(
         encryption_publickey: winning_bidder_state.public_key,
         inference_request,
         job_request_id: job_request_key,
-        winning_bidder: auction.winning_bid.inner().into(),
+        winning_bidder: winning_bidder_state.authority.inner().into(),
         winning_bid_price: auction.winning_bid_price.map(|p| p.get()),
         context_length_tier,
         expiry_duration_tier,
@@ -2340,10 +2340,12 @@ mod tests {
 
         clear_recent_blockhash_cache(&cache);
 
-        assert!(cache
-            .lock()
-            .expect("test mutex should not be poisoned")
-            .is_none());
+        assert!(
+            cache
+                .lock()
+                .expect("test mutex should not be poisoned")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2353,10 +2355,12 @@ mod tests {
         clear_recent_blockhash_cache(&cache);
         clear_recent_blockhash_cache(&cache);
 
-        assert!(cache
-            .lock()
-            .expect("test mutex should not be poisoned")
-            .is_none());
+        assert!(
+            cache
+                .lock()
+                .expect("test mutex should not be poisoned")
+                .is_none()
+        );
     }
 
     #[tokio::test]
