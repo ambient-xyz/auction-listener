@@ -1,5 +1,4 @@
-use ambient_auction_api::Auction;
-use bytemuck::Pod;
+use ambient_auction_api::{AccountData, Auction};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use yellowstone_grpc_client::{GeyserGrpcBuilderError, GeyserGrpcClient, GeyserGrpcClientError};
@@ -74,7 +73,7 @@ impl Clone for CloneableGeyserGrpcClient {
 /// The outer `Result` is for decode errors, and the 0 Option is for yellowstone upgrades
 /// that do not represent an auction account update
 #[allow(clippy::result_large_err)]
-pub fn decode_account_update<A: Pod>(
+pub fn decode_account_update<A: AccountData>(
     subscribe_update: yellowstone_grpc_proto::geyser::SubscribeUpdate,
 ) -> Result<Option<(Pubkey, A)>, YellowstoneGrpcError> {
     // The vast majority of this work is because the `subscribe` service is a multi-way stream that
@@ -95,11 +94,11 @@ pub fn decode_account_update<A: Pod>(
 }
 
 #[allow(clippy::result_large_err)]
-pub fn decode_account_info<A: Pod>(
+pub fn decode_account_info<A: AccountData>(
     account_info: SubscribeUpdateAccountInfo,
 ) -> Result<(Pubkey, A), YellowstoneGrpcError> {
     // The account_update.account may be None if the account was removed
-    let acc = bytemuck::try_pod_read_unaligned::<A>(account_info.data.as_slice())
+    let acc = A::try_read_unaligned(account_info.data.as_slice())
         .map_err(|e| YellowstoneGrpcError::Decode(e.to_string()));
 
     let pk = Pubkey::try_from(account_info.pubkey.as_slice())
