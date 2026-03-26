@@ -73,7 +73,8 @@ fn main() -> Result<(), String> {
     let args = Args::parse();
     let payer = read_keypair_file(args.authority_keypair).map_err(strerr)?;
     let rpc = RpcClient::new_with_commitment(
-        args.cluster_rpc.unwrap_or(ambient_auction_listener::CLIENT_URL.to_string()),
+        args.cluster_rpc
+            .unwrap_or(ambient_auction_listener::CLIENT_URL.to_string()),
         CommitmentConfig::confirmed(),
     );
     tokio::runtime::Builder::new_current_thread()
