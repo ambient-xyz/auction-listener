@@ -152,6 +152,23 @@ static RECLAIM_JOB_TASKS: LazyLock<Gauge> = LazyLock::new(|| {
     .unwrap()
 });
 
+static OVERLOADED_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "node:requests_failed_overloaded",
+        "The number of requests that fail due to no bidders ",
+        &["context_tier", "expiry_tiery", "cause"] // label names
+    )
+    .unwrap()
+});
+static SUCCESSFUL_ROUTING: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "node:requests_success_routing",
+        "The number of requests that successfully make it into the ",
+        &["context_tier", "expiry_tiery"] // label names
+    )
+    .unwrap()
+});
+
 struct GaugeHandle {
     gauge: &'static Gauge,
 }
@@ -1846,7 +1863,15 @@ pub async fn run_auction_and_get_data(
                 let _timer = RPC_CLIENT_TIMINGS
                     .with_label_values(&["wait_for_job_request_to_complete"])
                     .start_timer();
-                job_requests_task.await??
+                job_requests_task.await?.inspect_err(|e| if let crate::run::Error::BundleSaturated = e {
+                    OVERLOADED_REQUESTS
+                        .with_label_values(&[
+                            format!("{context_length_tier:?}"),
+                            format!("{expiry_duration_tier:?}"),
+                            "bundle saturated".to_string(),
+                        ])
+                    .inc();
+                })?
             };
             tracing::info!(job_request_id = %job_request_key, "Job request tx succeeded.");
 
@@ -1961,6 +1986,13 @@ pub async fn run_auction_and_get_data(
 
     if auction.winning_bid == [0u8; PUBKEY_BYTES] || auction.winning_bid == auction_id.to_bytes() {
         tracing::error!("There was no bids on the auction ({auction_id})");
+        OVERLOADED_REQUESTS
+            .with_label_values(&[
+                format!("{context_length_tier:?}"),
+                format!("{expiry_duration_tier:?}"),
+                "no bidders".to_string(),
+            ])
+            .inc();
         return Err(crate::run::Error::NoBidders(auction_id));
     }
 
@@ -1983,6 +2015,13 @@ pub async fn run_auction_and_get_data(
     let _ = lifecycle_tx.send(Ok(StreamingResponse::lifecycle(
         LifecycleEvent::WinningBid(winning_bidder_state.into()),
     )));
+    // We successfully routed this request to a host
+    SUCCESSFUL_ROUTING
+        .with_label_values(&[
+            format!("{context_length_tier:?}"),
+            format!("{expiry_duration_tier:?}"),
+        ])
+        .inc();
 
     let data_ip = IpAddr::from(winning_bidder_state.ip);
     let data_port = winning_bidder_state.port;
@@ -2140,6 +2179,8 @@ pub async fn submit_job_async<'a>(
             let client = args.client.clone();
             let payer = args.payer_keypair.clone();
             let input_data_account = args.input_data_account;
+            let context_tier_override = args.context_tier_override.clone();
+            let duration_tier = args.duration_tier.clone();
 
             let run_auction_result = timeout(
                 // 30s timeout to run the auction
@@ -2173,6 +2214,13 @@ pub async fn submit_job_async<'a>(
                     auction_err_tx
                         .send(Some(e))
                         .map_err(|_| run::Error::AuctionErrorChannel)?;
+                    OVERLOADED_REQUESTS
+                        .with_label_values(&[
+                            duration_tier.map(|t| format!("{t:?}")).unwrap_or("unknown".to_string()),
+                            context_tier_override.map(|t| format!("{t:?}")).unwrap_or("unknown".to_string()),
+                            "timeout".to_string(),
+                        ])
+                        .inc();
                     // Since this runs in a background task, returned error is not
                     // propagated regardless.
                     return Err(run::Error::Internal(Default::default()));
