@@ -3,6 +3,7 @@ use ambient_auction_api::BUNDLE_REGISTRY_SEED;
 use ambient_auction_api::{RequestBundle, RequestTier};
 use ambient_auction_client::sdk;
 use ambient_auction_client::ID as AUCTION_PROGRAM;
+use ambient_auction_listener::CLIENT_URL;
 use clap::Parser;
 use itertools::Itertools;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -18,7 +19,6 @@ use solana_sdk::{
 };
 use std::fmt::Display;
 use std::path::PathBuf;
-use ambient_auction_listener::CLIENT_URL;
 
 #[derive(Parser)]
 struct Args {
@@ -72,7 +72,9 @@ async fn cancel_bundles(payer: Keypair, client: &RpcClient) -> Result<(), String
                 }
             };
 
-        if bundle.requests_len < bundle.context_length_tier.get_request_per_bundle() && bundle.expiry_slot <= current_slot {
+        if bundle.requests_len < bundle.context_length_tier.get_request_per_bundle()
+            && bundle.expiry_slot <= current_slot
+        {
             let bundle_lamports = client
                 .get_minimum_balance_for_rent_exemption(RequestBundle::LEN)
                 .await
