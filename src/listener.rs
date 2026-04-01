@@ -1,4 +1,4 @@
-use ambient_auction_api::bundle::RequestBundle;
+use ambient_auction_api::bundle::{RawBundleRef, RequestBundle};
 use ambient_auction_api::instruction::{SubmitJobOutputArgs, SubmitValidationArgs};
 use ambient_auction_api::{
     error::AuctionError, Auction, AuctionStatus, Bid, JobRequest, JobRequestStatus,
@@ -195,6 +195,17 @@ fn clear_recent_blockhash_cache(cache: &Mutex<Option<CachedRecentBlockhash>>) {
         .lock()
         .expect("recent blockhash cache mutex should not be poisoned");
     *current = None;
+}
+
+fn decode_bundle_account_bytes(address: &Pubkey, bytes: &[u8]) -> Result<RequestBundle, Error> {
+    RawBundleRef::from_bytes(bytes)
+        .map(|bundle| *bundle.as_raw())
+        .ok_or_else(|| {
+            Error::Custom(format!(
+                "Account ({address}) did not decode into expected bundle layout: {}",
+                type_name::<RequestBundle>()
+            ))
+        })
 }
 
 pub struct AuctionClient {
@@ -1294,6 +1305,24 @@ impl AuctionClient {
         self.get_account_with_config(address, config).await
     }
 
+    #[instrument(level = "debug")]
+    pub async fn get_bundle_account_with_commitment(
+        &self,
+        address: &Pubkey,
+        commitment: Option<CommitmentConfig>,
+    ) -> Result<RequestBundle, Error> {
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(commitment.unwrap_or(CommitmentConfig::processed())),
+            min_context_slot: None,
+        };
+        let data = self
+            .get_account_data_with_config(address, config, type_name::<RequestBundle>())
+            .await?;
+        decode_bundle_account_bytes(address, &data)
+    }
+
     /// Retrieves an account associated with `address` and decodes it into a type `A` using
     /// [`bytemuck`] using the provided [`RpcAccountInfoConfig`].
     #[instrument]
@@ -1320,6 +1349,26 @@ impl AuctionClient {
         })
     }
 
+    #[instrument]
+    async fn get_account_data_with_config(
+        &self,
+        address: &Pubkey,
+        config: RpcAccountInfoConfig,
+        account_type: &'static str,
+    ) -> Result<Vec<u8>, Error> {
+        let Some(acct) = self
+            .rpc_client
+            .get_account_with_config(address, config)
+            .instrument(info_span!("solana_rpc_get_account_with_config"))
+            .await?
+            .value
+        else {
+            return Err(Error::AccountNotExist(account_type, *address));
+        };
+
+        Ok(acct.data)
+    }
+
     /// Retrieves an account associated with `address` and decodes it into a type `A` using
     /// [`bytemuck`] using default options and a commitement level of "processed."
     #[instrument(level = "debug")]
@@ -1331,6 +1380,20 @@ impl AuctionClient {
             min_context_slot: None,
         };
         self.get_account_with_config(address, config).await
+    }
+
+    #[instrument(level = "debug")]
+    pub async fn get_bundle_account(&self, address: &Pubkey) -> Result<RequestBundle, Error> {
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig::processed()),
+            min_context_slot: None,
+        };
+        let data = self
+            .get_account_data_with_config(address, config, type_name::<RequestBundle>())
+            .await?;
+        decode_bundle_account_bytes(address, &data)
     }
 
     #[instrument(level = "debug")]
@@ -1881,7 +1944,7 @@ pub async fn run_auction_and_get_data(
 
             let bundle_id = Pubkey::new_from_array(job_request.bundle.inner());
             let bundle = retry_client
-                .get_account_with_commitment::<RequestBundle>(
+                .get_bundle_account_with_commitment(
                     &bundle_id,
                     Some(CommitmentConfig::processed()),
                 )
@@ -2124,7 +2187,7 @@ pub async fn reclaim_job_request(
 
     let blockhash = client.get_recent_blockhash_cached().await?;
 
-    let bundle: RequestBundle = client.get_account(&bundle_key).await?;
+    let bundle = client.get_bundle_account(&bundle_key).await?;
     let RequestBundle { auction, .. } = bundle;
 
     let auction_key = Pubkey::new_from_array(auction.get().unwrap_or_default().inner());
@@ -2341,6 +2404,7 @@ async fn submit_job_sync<'a>(
 mod tests {
     use super::*;
     use crate::ID;
+    use ambient_auction_api::{bundle_account_len, AccountLayoutVersion, BundleLayoutTrailerV1};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn test_bundle_registry(latest_bundle: Pubkey) -> BundleRegistry {
@@ -2405,6 +2469,23 @@ mod tests {
             .lock()
             .expect("test mutex should not be poisoned")
             .is_none());
+    }
+
+    #[test]
+    fn decode_bundle_account_bytes_accepts_v1_layout() {
+        let pubkey = Pubkey::new_unique();
+        let bundle = RequestBundle {
+            requests_len: 2,
+            ..Default::default()
+        };
+        let mut bytes = vec![0u8; bundle_account_len(AccountLayoutVersion::V1)];
+        assert!(bundle.write_legacy_bytes(&mut bytes));
+        bytes[RequestBundle::LEN..]
+            .copy_from_slice(bytemuck::bytes_of(&BundleLayoutTrailerV1::new()));
+
+        let decoded = decode_bundle_account_bytes(&pubkey, &bytes).unwrap();
+
+        assert_eq!(decoded.requests_len, 2);
     }
 
     #[tokio::test]
