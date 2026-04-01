@@ -57,7 +57,7 @@ solana-account-decoder-client-types = "=2.3.13"
 solana-client = "=2.3.13"
 solana-sdk = "=2.3.1"
 ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", rev = "02b706378e69eb8f192796908c7417ed58c08896", features = ["serde"] }
-ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", rev = "29506e6397ae2df90fa880cff9889abbea345497" }
+ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", rev = "d9e8071b386d97ae998096220b5e581b3080c5e8" }
 itertools = "0.14"
 tokio = "1.45.0"
 tokio-stream = "0.1"
