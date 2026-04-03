@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-client"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-client?rev=04192d3a3b1bc92193b8f60a09c0de3e8a5d39db#04192d3a3b1bc92193b8f60a09c0de3e8a5d39db"
+source = "git+https://github.com/ambient-xyz/auction-client?rev=05a3b65e4ec8d7c0fbbb14509789bc184dcc3bfa#05a3b65e4ec8d7c0fbbb14509789bc184dcc3bfa"
 dependencies = [
  "ambient-auction-api",
  "lz4_flex",
