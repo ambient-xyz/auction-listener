@@ -482,54 +482,45 @@ pub struct StreamingToolCall {
     pub function: StreamingFunctionResponseDefinition,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(untagged)]
-pub enum ContentDelta {
-    Output {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
-        #[serde(deserialize_with = "Option::deserialize")]
-        content: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<StreamingToolCall>>,
-    },
-    Reasoning {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
-        #[serde(deserialize_with = "Option::deserialize", alias = "reasoning")]
-        reasoning_content: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<StreamingToolCall>>,
-    },
-    ToolCall {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        role: Option<String>,
-        tool_calls: Vec<StreamingToolCall>,
-    },
-    Finished {},
+/// A streaming delta from an OpenAI-compatible `/v1/chat/completions` endpoint.
+///
+/// This is a flat struct rather than a tagged/untagged enum because different
+/// inference backends (vLLM, SGLang) serialise deltas differently:
+///   - **vLLM** sends *either* `content` or `reasoning_content` per chunk (never both keys).
+///   - **SGLang** sends *both* keys in every chunk, with one set to `null`.
+///
+/// An `#[serde(untagged)]` enum cannot distinguish these cases reliably because
+/// serde picks the first variant that deserialises successfully; when SGLang sends
+/// `{"content": null, "reasoning_content": "..."}`, the `Output` variant would
+/// match on the null `content` and silently drop `reasoning_content`.
+#[derive(Deserialize, Serialize, Debug, Default)]
+pub struct ContentDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "reasoning")]
+    pub reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<StreamingToolCall>>,
 }
 
 impl ContentDelta {
     pub fn encrypt(&mut self, shared_secret: [u8; 32], iv: Iv) -> Result<(), AuctionError> {
-        let plaintext = match self {
-            ContentDelta::Reasoning {
-                reasoning_content: content,
-                ..
-            }
-            | ContentDelta::Output { content, .. } => content,
-            ContentDelta::ToolCall { .. } | ContentDelta::Finished {} => {
-                // We don't encrypt tool calls for now.
-                return Ok(());
-            }
-        };
-        *plaintext = match plaintext {
-            Some(plaintext) => Some(BASE64_STANDARD.encode(encrypt_with_iv(
-                plaintext.as_bytes(),
+        if let Some(text) = &self.content {
+            self.content = Some(BASE64_STANDARD.encode(encrypt_with_iv(
+                text.as_bytes(),
+                shared_secret,
+                iv.copy(),
+            )?));
+        }
+        if let Some(text) = &self.reasoning_content {
+            self.reasoning_content = Some(BASE64_STANDARD.encode(encrypt_with_iv(
+                text.as_bytes(),
                 shared_secret,
                 iv,
-            )?)),
-            None => None,
-        };
+            )?));
+        }
         Ok(())
     }
 }

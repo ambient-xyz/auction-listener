@@ -287,26 +287,23 @@ fn generate_streaming_messages(
             model: "z-ai/glm-4.6".into(),
             choices: vec![ContentChoice {
                 index: 0,
-                delta: if i > thinking_tokens {
-                    ContentDelta::Output {
-                        role: if i == 0 {
-                            Some("assistant".to_string())
-                        } else {
-                            None
-                        },
-                        content: Some(content),
-                        tool_calls: None,
-                    }
-                } else {
-                    ContentDelta::Reasoning {
-                        role: if i == 0 {
-                            Some("assistant".to_string())
-                        } else {
-                            None
-                        },
-                        reasoning_content: Some(content),
-                        tool_calls: None,
-                    }
+                delta: ContentDelta {
+                    role: if i == 0 {
+                        Some("assistant".to_string())
+                    } else {
+                        None
+                    },
+                    content: if i > thinking_tokens {
+                        Some(content.clone())
+                    } else {
+                        None
+                    },
+                    reasoning_content: if i <= thinking_tokens {
+                        Some(content)
+                    } else {
+                        None
+                    },
+                    tool_calls: None,
                 },
                 logprobs: None,
                 finish_reason: if is_last {
