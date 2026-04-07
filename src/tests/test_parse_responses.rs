@@ -199,17 +199,11 @@ mod tests {
                 assert_eq!(choices[0].index, 0);
                 assert_eq!(encryption_iv, None);
 
-                match &choices[0].delta {
-                    crate::run::ContentDelta::Output {
-                        role: None,
-                        content,
-                        tool_calls,
-                    } => {
-                        assert_eq!(content.as_deref(), Some("Hello"));
-                        assert!(tool_calls.is_none());
-                    }
-                    _ => panic!("Expected output content delta"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                assert_eq!(delta.content.as_deref(), Some("Hello"));
+                assert!(delta.reasoning_content.is_none());
+                assert!(delta.tool_calls.is_none());
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -236,20 +230,16 @@ mod tests {
             serde_json::from_str(json_input).expect("Failed to parse streaming reasoning");
 
         match &parsed {
-            StreamingResponse::Content { choices, .. } => match &choices[0].delta {
-                crate::run::ContentDelta::Reasoning {
-                    role: None,
-                    reasoning_content,
-                    tool_calls,
-                } => {
-                    assert_eq!(
-                        reasoning_content.as_deref(),
-                        Some("I need to analyze this problem...")
-                    );
-                    assert!(tool_calls.is_none());
-                }
-                _ => panic!("Expected reasoning content delta"),
-            },
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                assert!(delta.content.is_none());
+                assert_eq!(
+                    delta.reasoning_content.as_deref(),
+                    Some("I need to analyze this problem...")
+                );
+                assert!(delta.tool_calls.is_none());
+            }
             _ => panic!("Expected streaming content response"),
         }
 
@@ -294,22 +284,17 @@ mod tests {
             StreamingResponse::Content { id, choices, .. } => {
                 assert_eq!(id, "chatcmpl-71ce14c8d1bf4ed8b1b8bf6987926159");
                 assert_eq!(choices.len(), 1);
-                match &choices[0].delta {
-                    crate::run::ContentDelta::ToolCall {
-                        tool_calls,
-                        role: None,
-                    } => {
-                        assert_eq!(tool_calls.len(), 1);
-                        assert_eq!(
-                            tool_calls[0].id,
-                            Some("chatcmpl-tool-4d8d4cbf346a45d2a1a2763fb2f51ca4".to_string())
-                        );
-                        assert_eq!(tool_calls[0].type_, Some("function".to_string()));
-                        assert_eq!(tool_calls[0].function.name, Some("Bash".to_string()));
-                        assert_eq!(tool_calls[0].function.arguments, None);
-                    }
-                    _ => panic!("Expected output content delta"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                let tool_calls = delta.tool_calls.as_ref().expect("Expected tool calls");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(
+                    tool_calls[0].id,
+                    Some("chatcmpl-tool-4d8d4cbf346a45d2a1a2763fb2f51ca4".to_string())
+                );
+                assert_eq!(tool_calls[0].type_, Some("function".to_string()));
+                assert_eq!(tool_calls[0].function.name, Some("Bash".to_string()));
+                assert_eq!(tool_calls[0].function.arguments, None);
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -347,18 +332,13 @@ mod tests {
             StreamingResponse::Content { id, choices, .. } => {
                 assert_eq!(id, "chatcmpl-71ce14c8d1bf4ed8b1b8bf6987926159");
                 assert_eq!(choices.len(), 1);
-                match &choices[0].delta {
-                    crate::run::ContentDelta::ToolCall {
-                        tool_calls,
-                        role: None,
-                    } => {
-                        assert_eq!(tool_calls.len(), 1);
-                        assert_eq!(tool_calls[0].type_, None);
-                        assert_eq!(tool_calls[0].function.arguments.is_some(), true);
-                        assert_eq!(tool_calls[0].function.name, None);
-                    }
-                    _ => panic!("Expected output content delta"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                let tool_calls = delta.tool_calls.as_ref().expect("Expected tool calls");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].type_, None);
+                assert!(tool_calls[0].function.arguments.is_some());
+                assert_eq!(tool_calls[0].function.name, None);
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -400,17 +380,10 @@ mod tests {
                     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
                 );
 
-                match &choices[0].delta {
-                    crate::run::ContentDelta::Output {
-                        role: None,
-                        content,
-                        tool_calls,
-                    } => {
-                        assert_eq!(content.as_deref(), Some("SGVsbG8gV29ybGQ=")); // Base64 encoded content
-                        assert!(tool_calls.is_none());
-                    }
-                    _ => panic!("Expected output content delta"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                assert_eq!(delta.content.as_deref(), Some("SGVsbG8gV29ybGQ=")); // Base64 encoded content
+                assert!(delta.tool_calls.is_none());
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -455,21 +428,14 @@ mod tests {
                 assert_eq!(id, "chatcmpl-tool-stream-123");
                 assert_eq!(choices.len(), 1);
 
-                match &choices[0].delta {
-                    crate::run::ContentDelta::Output {
-                        role: None,
-                        content,
-                        tool_calls,
-                    } => {
-                        assert_eq!(content.as_deref(), Some("foobar"));
-                        let tool_calls = tool_calls.as_ref().expect("Expected tool calls");
-                        assert_eq!(tool_calls.len(), 1);
-                        assert_eq!(tool_calls[0].id, Some("call_streaming_abc123".to_string()));
-                        assert_eq!(tool_calls[0].type_, Some("function".to_string()));
-                        assert_eq!(tool_calls[0].function.name.is_some(), true);
-                    }
-                    _ => panic!("Expected output content delta with tool calls"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                assert_eq!(delta.content.as_deref(), Some("foobar"));
+                let tool_calls = delta.tool_calls.as_ref().expect("Expected tool calls");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, Some("call_streaming_abc123".to_string()));
+                assert_eq!(tool_calls[0].type_, Some("function".to_string()));
+                assert!(tool_calls[0].function.name.is_some());
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -513,18 +479,13 @@ mod tests {
                 assert_eq!(id, "chatcmpl-tool-stream-123");
                 assert_eq!(choices.len(), 1);
 
-                match &choices[0].delta {
-                    crate::run::ContentDelta::ToolCall {
-                        tool_calls,
-                        role: None,
-                    } => {
-                        assert_eq!(tool_calls.len(), 1);
-                        assert_eq!(tool_calls[0].id, Some("call_streaming_abc123".to_string()));
-                        assert_eq!(tool_calls[0].type_, Some("function".to_string()));
-                        assert_eq!(tool_calls[0].function.name, Some("get_weather".to_string()));
-                    }
-                    _ => panic!("Expected output content delta with tool calls"),
-                }
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role, None);
+                let tool_calls = delta.tool_calls.as_ref().expect("Expected tool calls");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, Some("call_streaming_abc123".to_string()));
+                assert_eq!(tool_calls[0].type_, Some("function".to_string()));
+                assert_eq!(tool_calls[0].function.name, Some("get_weather".to_string()));
             }
             _ => panic!("Expected streaming content response"),
         }
@@ -573,6 +534,212 @@ mod tests {
             Some("Hello world!".to_string())
         );
         assert!(parsed.choices[0].logprobs.is_some());
+    }
+
+    /// SGLang sends both `content` and `reasoning_content` in every delta,
+    /// with one set to `null`. Verify reasoning chunks parse correctly.
+    #[test]
+    fn test_parse_sglang_streaming_reasoning() {
+        let json_input = r#"{
+            "id": "chatcmpl-sglang-001",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "deepseek-r1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": "Let me think step by step..."
+                    },
+                    "finish_reason": null
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse SGLang reasoning chunk");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert_eq!(delta.role.as_deref(), Some("assistant"));
+                assert!(delta.content.is_none());
+                assert_eq!(
+                    delta.reasoning_content.as_deref(),
+                    Some("Let me think step by step...")
+                );
+            }
+            _ => panic!("Expected streaming content response"),
+        }
+    }
+
+    /// SGLang content chunk: `content` is non-null, `reasoning_content` is null.
+    #[test]
+    fn test_parse_sglang_streaming_content() {
+        let json_input = r#"{
+            "id": "chatcmpl-sglang-002",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "deepseek-r1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": "The answer is 42.",
+                        "reasoning_content": null
+                    },
+                    "finish_reason": null
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse SGLang content chunk");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert_eq!(delta.content.as_deref(), Some("The answer is 42."));
+                assert!(delta.reasoning_content.is_none());
+            }
+            _ => panic!("Expected streaming content response"),
+        }
+    }
+
+    /// SGLang sends empty `finish_reason: ""` instead of `null` in some cases.
+    #[test]
+    fn test_parse_sglang_empty_finish_reason() {
+        let json_input = r#"{
+            "id": "chatcmpl-sglang-003",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "deepseek-r1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "content": "hello",
+                        "reasoning_content": null
+                    },
+                    "finish_reason": ""
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse SGLang empty finish_reason");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                assert_eq!(choices[0].finish_reason, Some("".to_string()));
+                assert_eq!(choices[0].delta.content.as_deref(), Some("hello"));
+            }
+            _ => panic!("Expected streaming content response"),
+        }
+    }
+
+    /// vLLM sends only `reasoning_content` (no `content` key) in reasoning chunks.
+    /// This must still work after the struct change.
+    #[test]
+    fn test_parse_vllm_reasoning_only_key() {
+        let json_input = r#"{
+            "id": "chatcmpl-vllm-001",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "deepseek-r1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning_content": "Analyzing the problem..."
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse vLLM reasoning-only chunk");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert!(delta.content.is_none());
+                assert_eq!(
+                    delta.reasoning_content.as_deref(),
+                    Some("Analyzing the problem...")
+                );
+            }
+            _ => panic!("Expected streaming content response"),
+        }
+    }
+
+    /// vLLM newer versions use `reasoning` instead of `reasoning_content`.
+    /// The `alias = "reasoning"` should handle this.
+    #[test]
+    fn test_parse_vllm_reasoning_alias() {
+        let json_input = r#"{
+            "id": "chatcmpl-vllm-002",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "deepseek-r1",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning": "Using the reasoning field name..."
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse vLLM reasoning alias chunk");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert!(delta.content.is_none());
+                assert_eq!(
+                    delta.reasoning_content.as_deref(),
+                    Some("Using the reasoning field name...")
+                );
+            }
+            _ => panic!("Expected streaming content response"),
+        }
+    }
+
+    /// Empty delta `{}` (e.g. finish chunk) should parse with all fields None.
+    #[test]
+    fn test_parse_empty_delta() {
+        let json_input = r#"{
+            "id": "chatcmpl-finish",
+            "object": "chat.completion.chunk",
+            "created": 1677652400,
+            "model": "gpt-4",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }
+            ]
+        }"#;
+
+        let parsed: StreamingResponse =
+            serde_json::from_str(json_input).expect("Failed to parse empty delta");
+
+        match parsed {
+            StreamingResponse::Content { choices, .. } => {
+                let delta = &choices[0].delta;
+                assert!(delta.content.is_none());
+                assert!(delta.reasoning_content.is_none());
+                assert!(delta.tool_calls.is_none());
+                assert!(delta.role.is_none());
+            }
+            _ => panic!("Expected streaming content response"),
+        }
     }
 
     #[test]

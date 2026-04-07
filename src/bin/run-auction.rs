@@ -1,6 +1,6 @@
 use ambient_auction_listener::listener::{submit_job, AuctionClient};
 use ambient_auction_listener::run::{
-    self, ContentDelta, Error, InferenceArgs, InferenceMessage, InferenceResponse, MessageContent,
+    self, Error, InferenceArgs, InferenceMessage, InferenceResponse, MessageContent,
     StreamingResponse, Usage,
 };
 use ambient_auction_listener::YELLOWSTONE_URL;
@@ -212,33 +212,22 @@ async fn main() -> Result<(), Error> {
         match event {
             StreamingResponse::Content { choices, .. } => {
                 for choice in choices {
-                    match choice.delta {
-                        ContentDelta::Output { content, .. } => {
-                            let content = content.unwrap_or_default();
-                            hasher.update(&content);
-                            if matches!(state, Thinking) {
-                                state = Outputting;
-                                eprint!("</think>");
-                            }
-                            std::io::stdout().write_all(content.as_bytes())?;
+                    let delta = choice.delta;
+                    if let Some(reasoning) = &delta.reasoning_content {
+                        hasher.update(reasoning);
+                        if matches!(state, NotStarted) {
+                            state = Thinking;
+                            eprint!("<think>")
                         }
-                        ContentDelta::Reasoning {
-                            reasoning_content, ..
-                        } => {
-                            let reasoning_content = reasoning_content.unwrap_or_default();
-                            hasher.update(&reasoning_content);
-                            if matches!(state, NotStarted) {
-                                state = Thinking;
-                                eprint!("<think>")
-                            }
-                            std::io::stdout().write_all(reasoning_content.as_bytes())?;
+                        std::io::stdout().write_all(reasoning.as_bytes())?;
+                    }
+                    if let Some(content) = &delta.content {
+                        hasher.update(content);
+                        if matches!(state, Thinking) {
+                            state = Outputting;
+                            eprint!("</think>");
                         }
-                        ContentDelta::ToolCall { .. } => {
-                            // No output for tool calls, just ignore them.
-                        }
-                        ContentDelta::Finished {} => {
-                            // No output, we're done!
-                        }
+                        std::io::stdout().write_all(content.as_bytes())?;
                     }
                 }
             }
