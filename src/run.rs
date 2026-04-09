@@ -838,12 +838,12 @@ pub async fn stream_completion(
 
                 Some(Ok(StreamingResponse::Done))
             } else {
-                match serde_json::from_str::<FallibleResponse<StreamingResponse, AuctionError>>(
+                match serde_json::from_str::<FallibleResponse<StreamingResponse, serde_json::Value>>(
                     &event.data,
                 ) {
                     Ok(FallibleResponse::Ok(resp)) => Some(Ok(resp)),
                     Ok(FallibleResponse::Err(e)) => {
-                        tracing::error!(error = %e.error, "Upstream completions stream returned error");
+                        tracing::error!(error = %e, "Upstream completions stream returned error");
                         Some(Err(Error::Internal("Error calling completions endpoint".to_owned())))
                     }
                     Err(e) => {
@@ -912,7 +912,7 @@ pub async fn completion(
     if let Ok(token) = std::env::var("INFERENCE_TOKEN") {
         http_request = http_request.header("Authorization", format!("Bearer {token}"));
     }
-    let resp: FallibleResponse<Box<SyncResponse>, AuctionError> = http_request
+    let resp: FallibleResponse<Box<SyncResponse>, serde_json::Value> = http_request
         .send()
         .instrument(info_span!("completions_http", job_request_id = request.request_id, data_ip = %data_ip, data_port = data_port))
         .await?
@@ -922,7 +922,7 @@ pub async fn completion(
     match resp {
         FallibleResponse::Ok(resp) => Ok(resp),
         FallibleResponse::Err(e) => {
-            tracing::error!(error = %e.error, %data_ip, data_port, "Upstream completions endpoint returned error");
+            tracing::error!(error = %e, %data_ip, data_port, "Upstream completions endpoint returned error");
             Err(Error::Internal(
                 "Error calling completions endpoint".to_owned(),
             ))
