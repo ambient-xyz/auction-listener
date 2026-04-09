@@ -515,11 +515,8 @@ impl ContentDelta {
             )?));
         }
         if let Some(text) = &self.reasoning_content {
-            self.reasoning_content = Some(BASE64_STANDARD.encode(encrypt_with_iv(
-                text.as_bytes(),
-                shared_secret,
-                iv,
-            )?));
+            self.reasoning_content =
+                Some(BASE64_STANDARD.encode(encrypt_with_iv(text.as_bytes(), shared_secret, iv)?));
         }
         Ok(())
     }
@@ -686,6 +683,7 @@ pub struct SyncChoice {
 
     pub finish_reason: Option<String>,
     pub stop_reason: Option<serde_json::Value>,
+    pub matched_stop: Option<u64>,
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SyncResponse {
@@ -703,6 +701,7 @@ pub struct SyncResponse {
     pub prompt_logprobs: Option<serde_json::Value>,
     pub winning_bidder: Option<Pubkey>,
     pub winning_bid_price: Option<u64>,
+    pub metadata: serde_json::Value,
 }
 
 pub enum InferenceResponse<'a> {
