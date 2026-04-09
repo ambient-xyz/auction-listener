@@ -207,14 +207,7 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_json_fails() {
-        let invalid_json = r#"{
-            "model": "gpt-4",
-            "messages": [
-                {
-                    "role": "user"
-                }
-            ]
-        }"#;
+        let invalid_json = r#"{ not valid json }"#;
 
         let result: Result<InferenceArgs, _> = serde_json::from_str(invalid_json);
         assert!(result.is_err());

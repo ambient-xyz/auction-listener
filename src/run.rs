@@ -701,7 +701,8 @@ pub struct SyncResponse {
     pub prompt_logprobs: Option<serde_json::Value>,
     pub winning_bidder: Option<Pubkey>,
     pub winning_bid_price: Option<u64>,
-    pub metadata: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub enum InferenceResponse<'a> {
@@ -1003,6 +1004,44 @@ mod test {
                 ]
             }"#;
         // this should decode properly
+        let _decoded: StreamingResponse = serde_json::from_str(resp_raw).unwrap();
+    }
+
+    #[test]
+    fn test_broken_sync_resp_from_sglang() {
+        let resp_raw = r#"
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "index": 0,
+                        "logprobs": null,
+                        "matched_stop": 154827,
+                        "message": {
+                            "content": "Hello! How can I help you today?",
+                            "reasoning_content": "The user wants me to say hello.\nThis is a very simple request.\nI should provide a friendly greeting.\nCommon greetings include \"Hello!\", \"Hi there!\", \"Hello,I am a helpful assistant. How can I help you today?\"\nI will choose a standard, polite greeting.\n\nResponse: \"Hello! How can I help you today?\"",
+                            "role": "assistant",
+                            "tool_calls": null
+                        }
+                    }
+                ],
+                "created": 1775761511,
+                "id": "chatcmpl-B2BKirAAXYkuCdAYLbQJRcsKKuh9p6xBi8afa5vmQyvJ",
+                "merkle_root": "eb9d111d811fb07fc5c07482a4ec3fddf53d5432ec5828f485a64a6a09d3e281",
+                "metadata": {
+                    "weight_version": "default"
+                },
+                "model": "zai-org/GLM-5-FP8",
+                "object": "chat.completion",
+                "usage": {
+                    "completion_tokens": 80,
+                    "prompt_tokens": 15,
+                    "prompt_tokens_details": null,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 95
+                }
+            }
+        "#;
         let _decoded: StreamingResponse = serde_json::from_str(resp_raw).unwrap();
     }
 }

@@ -217,6 +217,7 @@ async fn sync_handler(min_delay: u64, max_delay: u64) -> SyncResponse {
             logprobs: None,
             finish_reason: Some("stop".to_string()),
             stop_reason: None,
+            matched_stop: None,
         }],
         usage: Some(UsageInfo {
             prompt_tokens: 10,
@@ -233,6 +234,7 @@ async fn sync_handler(min_delay: u64, max_delay: u64) -> SyncResponse {
         prompt_logprobs: None,
         winning_bidder: Some(Pubkey::new_unique()),
         winning_bid_price: Some(25),
+        metadata: None,
     }
 }
 
