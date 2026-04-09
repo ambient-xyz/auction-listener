@@ -147,13 +147,11 @@ mod tests {
 
         assert_eq!(parsed.id, "chatcmpl-789");
         assert_eq!(parsed.choices[0].message.content, None);
-        assert_eq!(parsed.choices[0].message.tool_calls.len(), 1);
-        assert_eq!(parsed.choices[0].message.tool_calls[0].id, "call_abc123");
-        assert_eq!(parsed.choices[0].message.tool_calls[0].type_, "function");
-        assert_eq!(
-            parsed.choices[0].message.tool_calls[0].function.name,
-            "get_weather"
-        );
+        let tool_calls = parsed.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_abc123");
+        assert_eq!(tool_calls[0].type_, "function");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 
     #[test]

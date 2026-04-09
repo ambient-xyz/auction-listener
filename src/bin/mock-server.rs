@@ -212,7 +212,7 @@ async fn sync_handler(min_delay: u64, max_delay: u64) -> SyncResponse {
                 annotations: None,
                 audio: None,
                 function_call: None,
-                tool_calls: vec![],
+                tool_calls: None,
             },
             logprobs: None,
             finish_reason: Some("stop".to_string()),

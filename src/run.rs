@@ -84,12 +84,13 @@ impl TryFrom<SyncMessage> for Vec<InferenceMessage> {
                 let mut out = vec![InferenceMessage::Assistant {
                     content: Some(MessageContent::Text(content)),
                 }];
-                for tool_call in tool_calls {
+                for tool_call in tool_calls.unwrap_or_default() {
+                    let id = tool_call.id.clone();
                     out.push(InferenceMessage::Tool {
                         content: serde_json::to_string(&tool_call).map_err(|e| {
                             format!("Unable to serialize tool call to JSON string: {e}")
                         })?,
-                        tool_call_id: tool_call.id,
+                        tool_call_id: id,
                     })
                 }
                 Ok(out)
@@ -671,8 +672,8 @@ pub struct SyncMessage {
     pub audio: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_call: Option<serde_json::Value>, // deprecated but leave it for now
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
