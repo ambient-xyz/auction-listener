@@ -16,6 +16,7 @@ use futures_util::stream::Stream;
 use solana_sdk::pubkey::Pubkey;
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::{debug, info, trace, warn};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -42,7 +43,7 @@ struct Args {
 
 static ARGS: std::sync::OnceLock<Args> = std::sync::OnceLock::new();
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ErrorKind {
     /// HTTP 500 with OpenAI-style JSON error body
     InternalServerError,
@@ -79,6 +80,7 @@ fn random_error(error_rate: f64, is_streaming: bool) -> Option<ErrorKind> {
             _ => ErrorKind::RateLimitExceeded,
         }
     };
+    warn!(is_streaming, ?kind, "Injecting error");
     Some(kind)
 }
 
@@ -151,6 +153,8 @@ async fn completions_handler(
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     let args = ARGS.get().unwrap();
     let is_streaming = request.stream == Some(true);
+    let model = request.model.as_deref().unwrap_or("unknown");
+    debug!(is_streaming, model, "Received completions request");
 
     let error = random_error(args.error_rate, is_streaming);
 
@@ -184,10 +188,20 @@ async fn streaming_handler(
 ) -> Sse<impl Stream<Item = Result<Event, axum::Error>>> {
     let delay_ms = 1000 / tps;
     let total_duration = rand::random::<u64>() % (max_delay - min_delay + 1) + min_delay;
-    let total_tokens = request
-        .max_completion_tokens
-        .unwrap_or(tps * total_duration);
+    let total_tokens = request.max_tokens.unwrap_or(
+        request
+            .max_completion_tokens
+            .unwrap_or(tps * total_duration),
+    );
     let request_id = format!("chatcmpl-{}", rand::random::<u64>());
+
+    info!(
+        %request_id,
+        total_tokens,
+        delay_ms,
+        total_duration,
+        "Starting streaming response"
+    );
 
     let messages = generate_streaming_messages(total_tokens, delay_ms, request_id, error);
     Sse::new(messages).keep_alive(KeepAlive::default())
@@ -195,6 +209,7 @@ async fn streaming_handler(
 
 async fn sync_handler(min_delay: u64, max_delay: u64) -> SyncResponse {
     let delay = rand::random::<u64>() % (max_delay - min_delay + 1) + min_delay;
+    info!(delay_secs = delay, "Starting sync response");
     sleep(Duration::from_secs(delay)).await;
 
     SyncResponse {
@@ -276,6 +291,8 @@ fn generate_streaming_messages(
     };
 
     let mut events = Vec::new();
+
+    trace!(total_tokens, emit_count, thinking_tokens, "Generating streaming messages");
 
     for i in 0..emit_count {
         let word = words[i as usize % words.len()];
@@ -369,18 +386,23 @@ fn generate_streaming_messages(
 async fn verify() -> Json<serde_json::Value> {
     let random_delay_seconds =
         rand::random_range::<u64, _>(0..=ARGS.get().unwrap().max_verification_delay);
+    debug!(delay_secs = random_delay_seconds, "Handling verify request");
     sleep(Duration::from_secs(random_delay_seconds)).await;
+    info!("Verify complete");
     Json(serde_json::json!({"success": true, "status": "Verified" }))
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
     let args = ARGS.get().unwrap();
     let load = rand::random_range::<f64, _>(0.0..args.max_load);
+    trace!(load, "Health check");
     Json(serde_json::json!({"ok": true, "load": load}))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let args = Args::parse();
     ARGS.set(args).unwrap();
 
@@ -389,15 +411,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(completions_handler))
         .route("/ambient/v1/inference/verify", post(verify));
 
-    println!(
-        "Mock server starting with TPS: {}, Delay range: {}-{} seconds, Error rate: {:.0}%",
-        ARGS.get().unwrap().tps,
-        ARGS.get().unwrap().min_delay,
-        ARGS.get().unwrap().max_delay,
-        ARGS.get().unwrap().error_rate * 100.0,
+    let a = ARGS.get().unwrap();
+    info!(
+        tps = a.tps,
+        min_delay = a.min_delay,
+        max_delay = a.max_delay,
+        error_rate = format_args!("{:.0}%", a.error_rate * 100.0),
+        "Mock server starting"
     );
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3002").await.unwrap();
+    info!("Listening on 0.0.0.0:3002");
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
