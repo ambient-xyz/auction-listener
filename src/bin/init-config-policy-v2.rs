@@ -326,6 +326,7 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn desired_policy_sets_primary_service_authority_and_flag() {
@@ -363,5 +364,35 @@ mod tests {
             updated.policy_flags & CONFIG_POLICY_V2_FLAG_ALLOW_SERVICE_PAGE_BACKED_FINALIZE_BYPASS,
             0
         );
+    }
+
+    #[test]
+    fn writes_test_validator_account_file_with_policy_bytes() {
+        let temp_path = env::temp_dir().join(format!(
+            "init-config-policy-v2-{}-{}.json",
+            std::process::id(),
+            Pubkey::new_unique()
+        ));
+        let policy_pda = ambient_auction_client::sdk::find_config_policy_v2();
+        let policy = desired_policy(Pubkey::new_unique());
+
+        write_test_validator_account_file(
+            &temp_path,
+            policy_pda,
+            policy,
+            Rent::default().minimum_balance(ConfigPolicyV2::LEN),
+        )
+        .unwrap();
+
+        let encoded = fs::read_to_string(&temp_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["pubkey"], policy_pda.to_string());
+        assert_eq!(
+            parsed["account"]["owner"],
+            ambient_auction_client::ID.to_string()
+        );
+        assert_eq!(parsed["account"]["space"], ConfigPolicyV2::LEN as u64);
+
+        let _ = fs::remove_file(temp_path);
     }
 }
