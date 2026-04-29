@@ -24,6 +24,7 @@ use std::{
 };
 
 const DEFAULT_AUTHORITY_KEYPAIR: &str = "~/.config/solana/id.json";
+const STANDARD_TIER_CONFIG_INDEX: usize = 2;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -42,6 +43,34 @@ struct Args {
     /// Add AllowServicePageBackedFinalizePayout to the default page-backed finalize bypass policy
     #[arg(long)]
     enable_page_backed_finalize_payout: bool,
+    /// Override the Standard tier settlement window in slots
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    standard_settlement_window_slots: Option<u64>,
+    /// Override the Standard tier result window in slots
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    standard_result_window_slots: Option<u64>,
+    /// Override the Standard tier verification window in slots
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    standard_verification_window_slots: Option<u64>,
+    /// Override the Standard tier claim window in slots
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    standard_claim_window_slots: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StandardTierWindowOverrides {
+    settlement: Option<u64>,
+    result: Option<u64>,
+    verification: Option<u64>,
+    claim: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StandardTierWindows {
+    settlement: u64,
+    result: u64,
+    verification: u64,
+    claim: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +84,7 @@ struct ConfigPolicyOutcome {
     action: ConfigPolicyAction,
     policy_pda: Pubkey,
     policy_flags: ConfigPolicyV2Flags,
+    standard_tier_windows: StandardTierWindows,
     signature: Signature,
 }
 
@@ -128,6 +158,44 @@ fn service_authorities_with_primary(
     updated
 }
 
+fn standard_tier_window_overrides(args: &Args) -> StandardTierWindowOverrides {
+    StandardTierWindowOverrides {
+        settlement: args.standard_settlement_window_slots,
+        result: args.standard_result_window_slots,
+        verification: args.standard_verification_window_slots,
+        claim: args.standard_claim_window_slots,
+    }
+}
+
+fn apply_standard_tier_window_overrides(
+    policy: &mut ConfigPolicyV2,
+    overrides: StandardTierWindowOverrides,
+) {
+    let tier_config = &mut policy.tier_configs[STANDARD_TIER_CONFIG_INDEX];
+    if let Some(settlement) = overrides.settlement {
+        tier_config.settlement_window_slots = settlement;
+    }
+    if let Some(result) = overrides.result {
+        tier_config.result_window_slots = result;
+    }
+    if let Some(verification) = overrides.verification {
+        tier_config.verification_window_slots = verification;
+    }
+    if let Some(claim) = overrides.claim {
+        tier_config.claim_window_slots = claim;
+    }
+}
+
+fn standard_tier_windows(policy: &ConfigPolicyV2) -> StandardTierWindows {
+    let tier_config = &policy.tier_configs[STANDARD_TIER_CONFIG_INDEX];
+    StandardTierWindows {
+        settlement: tier_config.settlement_window_slots,
+        result: tier_config.result_window_slots,
+        verification: tier_config.verification_window_slots,
+        claim: tier_config.claim_window_slots,
+    }
+}
+
 fn desired_policy_flags(enable_page_backed_finalize_payout: bool) -> ConfigPolicyV2Flags {
     let flags =
         ConfigPolicyV2Flags::from_flag(ConfigPolicyV2Flag::AllowServicePageBackedFinalizeBypass);
@@ -143,10 +211,12 @@ fn desired_policy_flags(enable_page_backed_finalize_payout: bool) -> ConfigPolic
 fn desired_policy(
     service_authority: Pubkey,
     enable_page_backed_finalize_payout: bool,
+    standard_tier_window_overrides: StandardTierWindowOverrides,
 ) -> ConfigPolicyV2 {
     let mut policy = ConfigPolicyV2::default();
     policy.service_authorities[0] = service_authority.to_bytes().into();
     policy.policy_flags = desired_policy_flags(enable_page_backed_finalize_payout);
+    apply_standard_tier_window_overrides(&mut policy, standard_tier_window_overrides);
     policy
 }
 
@@ -154,6 +224,7 @@ fn updated_policy(
     current: ConfigPolicyV2,
     service_authority: Pubkey,
     enable_page_backed_finalize_payout: bool,
+    standard_tier_window_overrides: StandardTierWindowOverrides,
 ) -> ConfigPolicyV2 {
     let mut policy = current;
     policy.service_authorities =
@@ -161,6 +232,7 @@ fn updated_policy(
     policy.policy_flags = policy
         .policy_flags
         .union(desired_policy_flags(enable_page_backed_finalize_payout));
+    apply_standard_tier_window_overrides(&mut policy, standard_tier_window_overrides);
     policy
 }
 
@@ -194,6 +266,7 @@ async fn initialize_or_update_config_policy_v2(
     authority: &Keypair,
     service_authority: Pubkey,
     enable_page_backed_finalize_payout: bool,
+    standard_tier_window_overrides: StandardTierWindowOverrides,
 ) -> Result<ConfigPolicyOutcome, String> {
     let policy_pda = ambient_auction_client::sdk::find_config_policy_v2(ambient_auction_client::ID);
     let existing = client
@@ -204,7 +277,11 @@ async fn initialize_or_update_config_policy_v2(
 
     match existing {
         None => {
-            let policy = desired_policy(service_authority, enable_page_backed_finalize_payout);
+            let policy = desired_policy(
+                service_authority,
+                enable_page_backed_finalize_payout,
+                standard_tier_window_overrides,
+            );
             let lamports = client
                 .get_minimum_balance_for_rent_exemption(ConfigPolicyV2::LEN)
                 .await
@@ -225,6 +302,7 @@ async fn initialize_or_update_config_policy_v2(
                 action: ConfigPolicyAction::Initialized,
                 policy_pda,
                 policy_flags: policy.policy_flags,
+                standard_tier_windows: standard_tier_windows(&policy),
                 signature,
             })
         }
@@ -244,6 +322,7 @@ async fn initialize_or_update_config_policy_v2(
                 current_policy,
                 service_authority,
                 enable_page_backed_finalize_payout,
+                standard_tier_window_overrides,
             );
             let signature = submit_policy_transaction(
                 client,
@@ -260,10 +339,19 @@ async fn initialize_or_update_config_policy_v2(
                 action: ConfigPolicyAction::Updated,
                 policy_pda,
                 policy_flags: policy.policy_flags,
+                standard_tier_windows: standard_tier_windows(&policy),
                 signature,
             })
         }
     }
+}
+
+fn print_policy_summary(policy_flags: ConfigPolicyV2Flags, windows: StandardTierWindows) {
+    println!("Policy flags: {}", policy_flags.bits());
+    println!(
+        "Standard tier windows: settlement={} result={} verification={} claim={}",
+        windows.settlement, windows.result, windows.verification, windows.claim
+    );
 }
 
 async fn config_policy_rent_lamports(client: &RpcClient) -> u64 {
@@ -312,6 +400,7 @@ fn main() -> Result<(), String> {
     let args = Args::parse();
     let authority = load_authority_keypair(&args.authority_keypair)?;
     let service_authority = args.service_authority.unwrap_or_else(|| authority.pubkey());
+    let standard_tier_window_overrides = standard_tier_window_overrides(&args);
     let rpc = RpcClient::new_with_commitment(args.cluster_rpc, CommitmentConfig::confirmed());
 
     if let Some(account_file) = args.test_validator_account_file {
@@ -323,11 +412,15 @@ fn main() -> Result<(), String> {
             .map_err(strerr)?
             .block_on(config_policy_rent_lamports(&rpc));
 
-        let policy = desired_policy(service_authority, args.enable_page_backed_finalize_payout);
+        let policy = desired_policy(
+            service_authority,
+            args.enable_page_backed_finalize_payout,
+            standard_tier_window_overrides,
+        );
         write_test_validator_account_file(&account_file, policy_pda, policy, lamports)?;
 
         println!("Config policy PDA: {policy_pda}");
-        println!("Policy flags: {}", policy.policy_flags.bits());
+        print_policy_summary(policy.policy_flags, standard_tier_windows(&policy));
         println!("Test validator account file: {}", account_file.display());
         return Ok(());
     }
@@ -341,13 +434,14 @@ fn main() -> Result<(), String> {
             &authority,
             service_authority,
             args.enable_page_backed_finalize_payout,
+            standard_tier_window_overrides,
         ));
 
     match outcome {
         Ok(outcome) => {
             println!("Action: {:?}", outcome.action);
             println!("Config policy PDA: {}", outcome.policy_pda);
-            println!("Policy flags: {}", outcome.policy_flags.bits());
+            print_policy_summary(outcome.policy_flags, outcome.standard_tier_windows);
             println!("Transaction signature: {}", outcome.signature);
             Ok(())
         }
@@ -365,7 +459,11 @@ mod tests {
     #[test]
     fn init_config_policy_v2_desired_policy_sets_primary_service_authority_and_bypass_flag() {
         let service_authority = Pubkey::new_unique();
-        let policy = desired_policy(service_authority, false);
+        let policy = desired_policy(
+            service_authority,
+            false,
+            StandardTierWindowOverrides::default(),
+        );
 
         assert_eq!(
             policy.service_authorities[0].inner(),
@@ -382,7 +480,11 @@ mod tests {
     #[test]
     fn init_config_policy_v2_desired_policy_adds_payout_flag_when_requested() {
         let service_authority = Pubkey::new_unique();
-        let policy = desired_policy(service_authority, true);
+        let policy = desired_policy(
+            service_authority,
+            true,
+            StandardTierWindowOverrides::default(),
+        );
 
         assert!(policy.policy_flags.contains_all(
             ConfigPolicyV2Flags::from_flag(
@@ -405,7 +507,12 @@ mod tests {
         current.service_authorities[0] = existing_a.to_bytes().into();
         current.service_authorities[1] = existing_b.to_bytes().into();
 
-        let updated = updated_policy(current, chosen, false);
+        let updated = updated_policy(
+            current,
+            chosen,
+            false,
+            StandardTierWindowOverrides::default(),
+        );
 
         assert_eq!(updated.service_authorities[0].inner(), chosen.to_bytes());
         assert_eq!(
@@ -425,7 +532,12 @@ mod tests {
         current.policy_flags =
             ConfigPolicyV2Flags::from_flag(ConfigPolicyV2Flag::AllowServiceCommitOverride);
 
-        let updated = updated_policy(current, service_authority, true);
+        let updated = updated_policy(
+            current,
+            service_authority,
+            true,
+            StandardTierWindowOverrides::default(),
+        );
 
         assert!(updated.policy_flags.contains_all(
             ConfigPolicyV2Flags::from_flag(ConfigPolicyV2Flag::AllowServiceCommitOverride)
@@ -436,5 +548,26 @@ mod tests {
                     ConfigPolicyV2Flag::AllowServicePageBackedFinalizePayout
                 ))
         ));
+    }
+
+    #[test]
+    fn init_config_policy_v2_desired_policy_applies_standard_tier_window_overrides() {
+        let service_authority = Pubkey::new_unique();
+        let policy = desired_policy(
+            service_authority,
+            false,
+            StandardTierWindowOverrides {
+                settlement: Some(40),
+                result: Some(120),
+                verification: Some(120),
+                claim: Some(5),
+            },
+        );
+        let windows = standard_tier_windows(&policy);
+
+        assert_eq!(windows.settlement, 40);
+        assert_eq!(windows.result, 120);
+        assert_eq!(windows.verification, 120);
+        assert_eq!(windows.claim, 5);
     }
 }
