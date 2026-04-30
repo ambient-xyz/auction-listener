@@ -1,45 +1,24 @@
-use ambient_auction_api::{
-    ConfigPolicyV2, ConfigPolicyV2Flag, ConfigPolicyV2Flags, CONFIG_POLICY_V2_SERVICE_CAPACITY,
-};
-use ambient_auction_listener::CLIENT_URL;
+use ambient_auction_api::{ConfigPolicyV2, ConfigPolicyV2Flag, ConfigPolicyV2Flags};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::Parser;
 use serde::Serialize;
 use solana_account_decoder_client_types::{UiAccount, UiAccountData, UiAccountEncoding};
-use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::{
-    account::Account,
-    commitment_config::CommitmentConfig,
-    message::{v0::Message, VersionedMessage},
-    pubkey::Pubkey,
-    rent::Rent,
-    signature::{read_keypair_file, Keypair, Signature},
-    signer::Signer as _,
-    transaction::VersionedTransaction,
-};
+use solana_sdk::{pubkey::Pubkey, rent::Rent};
 use std::{
-    env,
     fmt::Display,
     path::{Path, PathBuf},
 };
 
-const DEFAULT_AUTHORITY_KEYPAIR: &str = "~/.config/solana/id.json";
 const STANDARD_TIER_CONFIG_INDEX: usize = 2;
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// The Solana RPC cluster URL. Defaults to http://localhost:8899
-    #[arg(short = 'r', long, default_value = CLIENT_URL)]
-    cluster_rpc: String,
-    /// The authority keypair used to initialize or update the config policy
-    #[arg(long, default_value = DEFAULT_AUTHORITY_KEYPAIR)]
-    authority_keypair: String,
+    /// Write a solana-test-validator --account JSON file for local bootstrap
+    #[arg(long)]
+    test_validator_account_file: PathBuf,
     /// The service signer pubkey to place in service_authorities[0]
     #[arg(long)]
-    service_authority: Option<Pubkey>,
-    /// Write a solana-test-validator --account JSON file for local bootstrap instead of sending the oversized instruction
-    #[arg(long)]
-    test_validator_account_file: Option<PathBuf>,
+    service_authority: Pubkey,
     /// Add AllowServicePageBackedFinalizePayout to the default page-backed finalize bypass policy
     #[arg(long)]
     enable_page_backed_finalize_payout: bool,
@@ -73,21 +52,6 @@ struct StandardTierWindows {
     claim: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigPolicyAction {
-    Initialized,
-    Updated,
-}
-
-#[derive(Debug)]
-struct ConfigPolicyOutcome {
-    action: ConfigPolicyAction,
-    policy_pda: Pubkey,
-    policy_flags: ConfigPolicyV2Flags,
-    standard_tier_windows: StandardTierWindows,
-    signature: Signature,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TestValidatorAccountFile {
@@ -97,65 +61,6 @@ struct TestValidatorAccountFile {
 
 fn strerr<E: Display>(arg: E) -> String {
     format!("There was an error: {arg}")
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(path));
-    }
-
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-
-    PathBuf::from(path)
-}
-
-fn read_policy(account: &Account) -> Result<ConfigPolicyV2, String> {
-    if account.owner != ambient_auction_client::ID {
-        return Err(format!(
-            "Config policy account has unexpected owner {}; expected {}",
-            account.owner,
-            ambient_auction_client::ID
-        ));
-    }
-
-    bytemuck::try_from_bytes::<ConfigPolicyV2>(&account.data)
-        .copied()
-        .map_err(strerr)
-}
-
-fn has_authority(authorities: &[ambient_auction_api::Pubkey], authority: Pubkey) -> bool {
-    authorities
-        .iter()
-        .any(|entry| entry.inner() == authority.to_bytes())
-}
-
-fn service_authorities_with_primary(
-    existing: &[ambient_auction_api::Pubkey; CONFIG_POLICY_V2_SERVICE_CAPACITY],
-    service_authority: Pubkey,
-) -> [ambient_auction_api::Pubkey; CONFIG_POLICY_V2_SERVICE_CAPACITY] {
-    let mut updated = [ambient_auction_api::Pubkey::default(); CONFIG_POLICY_V2_SERVICE_CAPACITY];
-    updated[0] = service_authority.to_bytes().into();
-
-    let mut next_index = 1;
-    for existing_authority in existing {
-        let existing_key = existing_authority.inner();
-        if existing_key == [0; 32] || existing_key == service_authority.to_bytes() {
-            continue;
-        }
-        if next_index >= updated.len() {
-            break;
-        }
-        updated[next_index] = existing_key.into();
-        next_index += 1;
-    }
-
-    updated
 }
 
 fn standard_tier_window_overrides(args: &Args) -> StandardTierWindowOverrides {
@@ -220,133 +125,12 @@ fn desired_policy(
     policy
 }
 
-fn updated_policy(
-    current: ConfigPolicyV2,
-    service_authority: Pubkey,
-    enable_page_backed_finalize_payout: bool,
-    standard_tier_window_overrides: StandardTierWindowOverrides,
-) -> ConfigPolicyV2 {
-    let mut policy = current;
-    policy.service_authorities =
-        service_authorities_with_primary(&policy.service_authorities, service_authority);
-    policy.policy_flags = policy
-        .policy_flags
-        .union(desired_policy_flags(enable_page_backed_finalize_payout));
-    apply_standard_tier_window_overrides(&mut policy, standard_tier_window_overrides);
-    policy
-}
-
-async fn submit_policy_transaction(
-    client: &RpcClient,
-    authority: &Keypair,
-    instruction: solana_sdk::instruction::Instruction,
-) -> Result<Signature, String> {
-    let tx = VersionedTransaction::try_new(
-        VersionedMessage::V0(
-            Message::try_compile(
-                &authority.pubkey(),
-                &[instruction],
-                &[],
-                client.get_latest_blockhash().await.map_err(strerr)?,
-            )
-            .map_err(strerr)?,
-        ),
-        &[authority],
-    )
-    .map_err(strerr)?;
-
-    client
-        .send_and_confirm_transaction_with_spinner(&tx)
-        .await
-        .map_err(strerr)
-}
-
-async fn initialize_or_update_config_policy_v2(
-    client: &RpcClient,
-    authority: &Keypair,
-    service_authority: Pubkey,
-    enable_page_backed_finalize_payout: bool,
-    standard_tier_window_overrides: StandardTierWindowOverrides,
-) -> Result<ConfigPolicyOutcome, String> {
-    let policy_pda = ambient_auction_client::sdk::find_config_policy_v2(ambient_auction_client::ID);
-    let existing = client
-        .get_account_with_commitment(&policy_pda, CommitmentConfig::confirmed())
-        .await
-        .map_err(strerr)?
-        .value;
-
-    match existing {
-        None => {
-            let policy = desired_policy(
-                service_authority,
-                enable_page_backed_finalize_payout,
-                standard_tier_window_overrides,
-            );
-            let lamports = client
-                .get_minimum_balance_for_rent_exemption(ConfigPolicyV2::LEN)
-                .await
-                .map_err(strerr)?;
-            let signature = submit_policy_transaction(
-                client,
-                authority,
-                ambient_auction_client::sdk::init_config_policy_v2(
-                    authority.pubkey(),
-                    ambient_auction_client::ID,
-                    lamports,
-                    policy,
-                ),
-            )
-            .await?;
-
-            Ok(ConfigPolicyOutcome {
-                action: ConfigPolicyAction::Initialized,
-                policy_pda,
-                policy_flags: policy.policy_flags,
-                standard_tier_windows: standard_tier_windows(&policy),
-                signature,
-            })
-        }
-        Some(account) => {
-            let current_policy = read_policy(&account)?;
-            let authority_key = authority.pubkey();
-            if !has_authority(&current_policy.admin_authorities, authority_key)
-                && !has_authority(&current_policy.service_authorities, authority_key)
-            {
-                return Err(format!(
-                    "Authority {} is neither an admin nor a service authority on existing config policy {}",
-                    authority_key, policy_pda
-                ));
-            }
-
-            let policy = updated_policy(
-                current_policy,
-                service_authority,
-                enable_page_backed_finalize_payout,
-                standard_tier_window_overrides,
-            );
-            let signature = submit_policy_transaction(
-                client,
-                authority,
-                ambient_auction_client::sdk::set_config_policy_v2(
-                    authority.pubkey(),
-                    ambient_auction_client::ID,
-                    policy,
-                ),
-            )
-            .await?;
-
-            Ok(ConfigPolicyOutcome {
-                action: ConfigPolicyAction::Updated,
-                policy_pda,
-                policy_flags: policy.policy_flags,
-                standard_tier_windows: standard_tier_windows(&policy),
-                signature,
-            })
-        }
-    }
-}
-
-fn print_policy_summary(policy_flags: ConfigPolicyV2Flags, windows: StandardTierWindows) {
+fn print_policy_summary(
+    policy_pda: Pubkey,
+    policy_flags: ConfigPolicyV2Flags,
+    windows: StandardTierWindows,
+) {
+    println!("Config policy PDA: {policy_pda}");
     println!("Policy flags: {}", policy_flags.bits());
     println!(
         "Standard tier windows: settlement={} result={} verification={} claim={}",
@@ -354,32 +138,16 @@ fn print_policy_summary(policy_flags: ConfigPolicyV2Flags, windows: StandardTier
     );
 }
 
-async fn config_policy_rent_lamports(client: &RpcClient) -> u64 {
-    match client
-        .get_minimum_balance_for_rent_exemption(ConfigPolicyV2::LEN)
-        .await
-    {
-        Ok(lamports) => lamports,
-        Err(err) => {
-            eprintln!(
-                "Falling back to default rent calculation after RPC rent lookup failed: {err}"
-            );
-            Rent::default().minimum_balance(ConfigPolicyV2::LEN)
-        }
-    }
-}
-
 fn write_test_validator_account_file(
     path: &Path,
     policy_pda: Pubkey,
     policy: ConfigPolicyV2,
-    lamports: u64,
 ) -> Result<(), String> {
     let encoded_policy = BASE64_STANDARD.encode(bytemuck::bytes_of(&policy));
     let account_file = TestValidatorAccountFile {
         pubkey: policy_pda.to_string(),
         account: UiAccount {
-            lamports,
+            lamports: Rent::default().minimum_balance(ConfigPolicyV2::LEN),
             data: UiAccountData::Binary(encoded_policy, UiAccountEncoding::Base64),
             owner: ambient_auction_client::ID.to_string(),
             executable: false,
@@ -392,64 +160,28 @@ fn write_test_validator_account_file(
     std::fs::write(path, encoded).map_err(strerr)
 }
 
-fn load_authority_keypair(path: &str) -> Result<Keypair, String> {
-    read_keypair_file(expand_tilde(path)).map_err(strerr)
-}
-
 fn main() -> Result<(), String> {
     let args = Args::parse();
-    let authority = load_authority_keypair(&args.authority_keypair)?;
-    let service_authority = args.service_authority.unwrap_or_else(|| authority.pubkey());
     let standard_tier_window_overrides = standard_tier_window_overrides(&args);
-    let rpc = RpcClient::new_with_commitment(args.cluster_rpc, CommitmentConfig::confirmed());
+    let policy = desired_policy(
+        args.service_authority,
+        args.enable_page_backed_finalize_payout,
+        standard_tier_window_overrides,
+    );
+    let policy_pda = ambient_auction_client::sdk::find_config_policy_v2(ambient_auction_client::ID);
 
-    if let Some(account_file) = args.test_validator_account_file {
-        let policy_pda =
-            ambient_auction_client::sdk::find_config_policy_v2(ambient_auction_client::ID);
-        let lamports = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(strerr)?
-            .block_on(config_policy_rent_lamports(&rpc));
+    write_test_validator_account_file(&args.test_validator_account_file, policy_pda, policy)?;
 
-        let policy = desired_policy(
-            service_authority,
-            args.enable_page_backed_finalize_payout,
-            standard_tier_window_overrides,
-        );
-        write_test_validator_account_file(&account_file, policy_pda, policy, lamports)?;
-
-        println!("Config policy PDA: {policy_pda}");
-        print_policy_summary(policy.policy_flags, standard_tier_windows(&policy));
-        println!("Test validator account file: {}", account_file.display());
-        return Ok(());
-    }
-
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(strerr)?
-        .block_on(initialize_or_update_config_policy_v2(
-            &rpc,
-            &authority,
-            service_authority,
-            args.enable_page_backed_finalize_payout,
-            standard_tier_window_overrides,
-        ));
-
-    match outcome {
-        Ok(outcome) => {
-            println!("Action: {:?}", outcome.action);
-            println!("Config policy PDA: {}", outcome.policy_pda);
-            print_policy_summary(outcome.policy_flags, outcome.standard_tier_windows);
-            println!("Transaction signature: {}", outcome.signature);
-            Ok(())
-        }
-        Err(err) if err.contains("too large") => Err(format!(
-            "{err}\nUse --test-validator-account-file <PATH> for local solana-test-validator bootstrap."
-        )),
-        Err(err) => Err(err),
-    }
+    print_policy_summary(
+        policy_pda,
+        policy.policy_flags,
+        standard_tier_windows(&policy),
+    );
+    println!(
+        "Test validator account file: {}",
+        args.test_validator_account_file.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -486,6 +218,7 @@ mod tests {
             StandardTierWindowOverrides::default(),
         );
 
+        assert_eq!(policy.policy_flags.bits(), 48);
         assert!(policy.policy_flags.contains_all(
             ConfigPolicyV2Flags::from_flag(
                 ConfigPolicyV2Flag::AllowServicePageBackedFinalizeBypass
@@ -493,60 +226,6 @@ mod tests {
             .union(ConfigPolicyV2Flags::from_flag(
                 ConfigPolicyV2Flag::AllowServicePageBackedFinalizePayout
             ))
-        ));
-    }
-
-    #[test]
-    fn init_config_policy_v2_updated_policy_promotes_service_authority_without_dropping_existing_entries(
-    ) {
-        let existing_a = Pubkey::new_unique();
-        let existing_b = Pubkey::new_unique();
-        let chosen = existing_b;
-
-        let mut current = ConfigPolicyV2::default();
-        current.service_authorities[0] = existing_a.to_bytes().into();
-        current.service_authorities[1] = existing_b.to_bytes().into();
-
-        let updated = updated_policy(
-            current,
-            chosen,
-            false,
-            StandardTierWindowOverrides::default(),
-        );
-
-        assert_eq!(updated.service_authorities[0].inner(), chosen.to_bytes());
-        assert_eq!(
-            updated.service_authorities[1].inner(),
-            existing_a.to_bytes()
-        );
-        assert!(updated
-            .policy_flags
-            .contains(ConfigPolicyV2Flag::AllowServicePageBackedFinalizeBypass));
-    }
-
-    #[test]
-    fn init_config_policy_v2_updated_policy_preserves_existing_flags_and_adds_payout_when_requested(
-    ) {
-        let service_authority = Pubkey::new_unique();
-        let mut current = ConfigPolicyV2::default();
-        current.policy_flags =
-            ConfigPolicyV2Flags::from_flag(ConfigPolicyV2Flag::AllowServiceCommitOverride);
-
-        let updated = updated_policy(
-            current,
-            service_authority,
-            true,
-            StandardTierWindowOverrides::default(),
-        );
-
-        assert!(updated.policy_flags.contains_all(
-            ConfigPolicyV2Flags::from_flag(ConfigPolicyV2Flag::AllowServiceCommitOverride)
-                .union(ConfigPolicyV2Flags::from_flag(
-                    ConfigPolicyV2Flag::AllowServicePageBackedFinalizeBypass
-                ))
-                .union(ConfigPolicyV2Flags::from_flag(
-                    ConfigPolicyV2Flag::AllowServicePageBackedFinalizePayout
-                ))
         ));
     }
 
