@@ -74,30 +74,33 @@
             nativeBuildInputs = with pkgs; [
               pkg-config
             ];
+            buildInputs =
+              with pkgs;
+              [
+                openssl
+                krb5Full
+                libxml2
+                zstd
+                libz
+                lz4
+              ]
+              ++ lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ]
+              ++ lib.optionals stdenv.hostPlatform.isLinux [
+                krb5Full.dev
+              ];
             packages =
               with pkgs;
               [
                 llvmPackages.bintools
                 rustToolchain
-                openssl_3.dev
-                #rust-analyzer
                 cargo-watch
-                pkg-config
                 cargo-deny
                 cargo-edit
-                krb5Full
-                openssl
-                libxml2
                 bacon
-                zstd
-                libz
-                lz4
                 rc
               ]
-              ++ lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ]
               ++ lib.optionals stdenv.hostPlatform.isLinux [
                 gdb
-                krb5Full.dev
               ];
 
             # NIX LD Env vars so postgresql_embedded can run with Nix based dependencies

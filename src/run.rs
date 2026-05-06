@@ -462,7 +462,7 @@ pub struct UsageInfo {
     pub prompt_tokens: u64,
     pub total_tokens: u64,
     pub completion_tokens: u64,
-    pub prompt_tokens_details: Option<String>,
+    pub prompt_tokens_details: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
