@@ -61,6 +61,46 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_sync_response_with_structured_prompt_tokens_details() {
+        let json_input = r#"{
+            "id": "chatcmpl-cache",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "gpt-4",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello"
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30,
+                "prompt_tokens_details": {
+                    "cached_tokens": 8
+                }
+            }
+        }"#;
+
+        let parsed: SyncResponse =
+            serde_json::from_str(json_input).expect("Failed to parse sync response");
+
+        assert_eq!(
+            parsed
+                .usage
+                .unwrap()
+                .prompt_tokens_details
+                .unwrap()["cached_tokens"],
+            8
+        );
+    }
+
+    #[test]
     fn test_parse_sync_response_with_reasoning() {
         let json_input = r#"{
             "id": "chatcmpl-456",
