@@ -277,7 +277,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-api"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-api?rev=b308ef590c0b692b465d750b4e7e4d4f717db574#b308ef590c0b692b465d750b4e7e4d4f717db574"
+source = "git+https://github.com/ambient-xyz/auction-api?rev=87c6f00be98c4ff1e4c38bbbf4ef7d851d23ba73#87c6f00be98c4ff1e4c38bbbf4ef7d851d23ba73"
 dependencies = [
  "borsh 0.10.4",
  "bs58",
@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-client"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-client?rev=35647f6d84cba0fa5b3a20c10b92dc91b2c010c3#35647f6d84cba0fa5b3a20c10b92dc91b2c010c3"
+source = "git+https://github.com/ambient-xyz/auction-client?rev=ad12ea9481ced72bcba893b0175b8f34e726c763#ad12ea9481ced72bcba893b0175b8f34e726c763"
 dependencies = [
  "ambient-auction-api",
  "lz4_flex",
