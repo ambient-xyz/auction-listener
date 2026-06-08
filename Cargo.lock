@@ -277,7 +277,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-api"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-api?rev=87c6f00be98c4ff1e4c38bbbf4ef7d851d23ba73#87c6f00be98c4ff1e4c38bbbf4ef7d851d23ba73"
+source = "git+https://github.com/ambient-xyz/auction-api?rev=ded86adbcb8603487b4cfc4d9dd4ea99181f6c2a#ded86adbcb8603487b4cfc4d9dd4ea99181f6c2a"
 dependencies = [
  "borsh 0.10.4",
  "bs58",
@@ -291,7 +291,7 @@ dependencies = [
 [[package]]
 name = "ambient-auction-client"
 version = "0.1.0"
-source = "git+https://github.com/ambient-xyz/auction-client?rev=ad12ea9481ced72bcba893b0175b8f34e726c763#ad12ea9481ced72bcba893b0175b8f34e726c763"
+source = "git+https://github.com/ambient-xyz/auction-client?rev=0c491ff332f1364a7ea657d12616b8b6f624bdd8#0c491ff332f1364a7ea657d12616b8b6f624bdd8"
 dependencies = [
  "ambient-auction-api",
  "lz4_flex",
@@ -1779,7 +1779,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4347,7 +4347,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4417,7 +4417,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4523,7 +4523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7504,7 +7504,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8440,7 +8440,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

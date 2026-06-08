@@ -1,16 +1,23 @@
-#![cfg(feature = "global-config")]
+#![cfg_attr(not(feature = "global-config"), allow(unused))]
+#[cfg(feature = "global-config")]
 use ambient_auction_api::{Config, InitConfigArgs};
+#[cfg(feature = "global-config")]
 use clap::Parser;
+#[cfg(feature = "global-config")]
 use solana_client::nonblocking::rpc_client::RpcClient;
+#[cfg(feature = "global-config")]
 use solana_sdk::commitment_config::CommitmentConfig;
+#[cfg(feature = "global-config")]
 use solana_sdk::{
     message::{v0::Message, VersionedMessage},
     signature::{read_keypair_file, Keypair},
     signer::Signer as _,
     transaction::VersionedTransaction,
 };
+#[cfg(feature = "global-config")]
 use std::{fmt::Display, path::PathBuf};
 
+#[cfg(feature = "global-config")]
 #[derive(Parser)]
 struct Args {
     /// The keypair that will be the update authority for the config account
@@ -23,10 +30,12 @@ struct Args {
     cluster_rpc: Option<String>,
 }
 
+#[cfg(feature = "global-config")]
 fn strerr<E: Display>(arg: E) -> String {
     format!("There was an error: {arg}")
 }
 
+#[cfg(feature = "global-config")]
 async fn initialize_config(
     client: &RpcClient,
     update_authority: &Keypair,
@@ -69,6 +78,7 @@ async fn initialize_config(
     Ok(())
 }
 
+#[cfg(feature = "global-config")]
 fn main() -> Result<(), String> {
     let args = Args::parse();
     let payer = read_keypair_file(args.authority_keypair).map_err(strerr)?;
@@ -86,4 +96,9 @@ fn main() -> Result<(), String> {
             &payer,
             args.minimum_bundle_auction_pairs,
         ))
+}
+
+#[cfg(not(feature = "global-config"))]
+fn main() -> Result<(), String> {
+    Err("init-config requires the global-config feature".to_string())
 }
