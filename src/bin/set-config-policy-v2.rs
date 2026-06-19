@@ -542,6 +542,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ambient_auction_api::{ConfigPolicyV2PatchKind, SetConfigPolicyV2Args};
 
     fn args_for(command: Command) -> Cli {
         Cli {
@@ -677,17 +678,13 @@ mod tests {
         let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
 
         assert_eq!(plan.kind, "dispute-settings");
-        assert!(plan.instruction.is_some());
-        assert!(plan
-            .after
-            .contains("missed_verification_dispute_window_slots=5"));
-        assert!(plan.after.contains("dispute_verification_window_slots=7"));
-        assert!(plan
-            .after
-            .contains("paid_verification_dispute_window_slots=11"));
-        assert!(plan
-            .after
-            .contains("paid_verification_dispute_bond_lamports=13"));
+        let instruction = plan.instruction.unwrap();
+        let args = SetConfigPolicyV2Args::try_from(&instruction.data[1..]).unwrap();
+        assert_eq!(args.patch_kind, ConfigPolicyV2PatchKind::DISPUTE_SETTINGS);
+        assert_eq!(args.missed_verification_dispute_window_slots, 5);
+        assert_eq!(args.dispute_verification_window_slots, 7);
+        assert_eq!(args.paid_verification_dispute_window_slots, 11);
+        assert_eq!(args.paid_verification_dispute_bond_lamports, 13);
     }
 
     #[test]
