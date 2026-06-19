@@ -42,6 +42,8 @@ enum Command {
     VerifierSettings(VerifierSettingsArgs),
     /// Patch max auction credits per update
     MaxAuctionCreditsPerUpdate(MaxAuctionCreditsArgs),
+    /// Patch V2 verification dispute settings
+    DisputeSettings(DisputeSettingsArgs),
     /// Patch one request tier config, preserving unspecified fields
     TierConfig(TierConfigArgs),
 }
@@ -94,6 +96,22 @@ struct MaxAuctionCreditsArgs {
     /// Maximum auction credits that one update can apply
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     value: u64,
+}
+
+#[derive(ClapArgs, Debug)]
+struct DisputeSettingsArgs {
+    /// Slots after verification deadline when a missed verification can be disputed
+    #[arg(long)]
+    missed_verification_dispute_window_slots: u64,
+    /// Slots replacement verifiers have to resolve an opened dispute
+    #[arg(long)]
+    dispute_verification_window_slots: u64,
+    /// Slots after provisional finalize when a paid verdict dispute can be opened
+    #[arg(long)]
+    paid_verification_dispute_window_slots: u64,
+    /// Lamports paid to open a paid verdict dispute
+    #[arg(long)]
+    paid_verification_dispute_bond_lamports: u64,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -394,6 +412,43 @@ fn build_patch_plan(
                 }),
             })
         }
+        Command::DisputeSettings(args) => {
+            let changed = policy.missed_verification_dispute_window_slots
+                != args.missed_verification_dispute_window_slots
+                || policy.dispute_verification_window_slots
+                    != args.dispute_verification_window_slots
+                || policy.paid_verification_dispute_window_slots
+                    != args.paid_verification_dispute_window_slots
+                || policy.paid_verification_dispute_bond_lamports
+                    != args.paid_verification_dispute_bond_lamports;
+            Ok(PatchPlan {
+                kind: "dispute-settings",
+                before: format!(
+                    "missed_verification_dispute_window_slots={} dispute_verification_window_slots={} paid_verification_dispute_window_slots={} paid_verification_dispute_bond_lamports={}",
+                    policy.missed_verification_dispute_window_slots,
+                    policy.dispute_verification_window_slots,
+                    policy.paid_verification_dispute_window_slots,
+                    policy.paid_verification_dispute_bond_lamports
+                ),
+                after: format!(
+                    "missed_verification_dispute_window_slots={} dispute_verification_window_slots={} paid_verification_dispute_window_slots={} paid_verification_dispute_bond_lamports={}",
+                    args.missed_verification_dispute_window_slots,
+                    args.dispute_verification_window_slots,
+                    args.paid_verification_dispute_window_slots,
+                    args.paid_verification_dispute_bond_lamports
+                ),
+                instruction: changed.then(|| {
+                    ambient_auction_client::sdk::set_config_policy_v2_dispute_settings(
+                        program_id,
+                        authority,
+                        args.missed_verification_dispute_window_slots,
+                        args.dispute_verification_window_slots,
+                        args.paid_verification_dispute_window_slots,
+                        args.paid_verification_dispute_bond_lamports,
+                    )
+                }),
+            })
+        }
         Command::TierConfig(args) => {
             let tier = request_tier_from_arg(args.tier);
             let before = policy.tier_configs[request_tier_config_index(tier)];
@@ -604,6 +659,49 @@ mod tests {
             set_bits: Some(48),
             enable: Vec::new(),
             disable: Vec::new(),
+        }));
+        let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
+
+        assert!(plan.instruction.is_none());
+    }
+
+    #[test]
+    fn set_config_policy_v2_dispute_settings_builds_patch() {
+        let policy = ConfigPolicyV2::production_default();
+        let cli = args_for(Command::DisputeSettings(DisputeSettingsArgs {
+            missed_verification_dispute_window_slots: 5,
+            dispute_verification_window_slots: 7,
+            paid_verification_dispute_window_slots: 11,
+            paid_verification_dispute_bond_lamports: 13,
+        }));
+        let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
+
+        assert_eq!(plan.kind, "dispute-settings");
+        assert!(plan.instruction.is_some());
+        assert!(plan
+            .after
+            .contains("missed_verification_dispute_window_slots=5"));
+        assert!(plan.after.contains("dispute_verification_window_slots=7"));
+        assert!(plan
+            .after
+            .contains("paid_verification_dispute_window_slots=11"));
+        assert!(plan
+            .after
+            .contains("paid_verification_dispute_bond_lamports=13"));
+    }
+
+    #[test]
+    fn set_config_policy_v2_dispute_settings_noop_skips_instruction() {
+        let mut policy = ConfigPolicyV2::production_default();
+        policy.missed_verification_dispute_window_slots = 5;
+        policy.dispute_verification_window_slots = 7;
+        policy.paid_verification_dispute_window_slots = 11;
+        policy.paid_verification_dispute_bond_lamports = 13;
+        let cli = args_for(Command::DisputeSettings(DisputeSettingsArgs {
+            missed_verification_dispute_window_slots: 5,
+            dispute_verification_window_slots: 7,
+            paid_verification_dispute_window_slots: 11,
+            paid_verification_dispute_bond_lamports: 13,
         }));
         let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
 
