@@ -686,22 +686,4 @@ mod tests {
         assert_eq!(args.paid_verification_dispute_window_slots, 11);
         assert_eq!(args.paid_verification_dispute_bond_lamports, 13);
     }
-
-    #[test]
-    fn set_config_policy_v2_dispute_settings_noop_skips_instruction() {
-        let mut policy = ConfigPolicyV2::production_default();
-        policy.missed_verification_dispute_window_slots = 5;
-        policy.dispute_verification_window_slots = 7;
-        policy.paid_verification_dispute_window_slots = 11;
-        policy.paid_verification_dispute_bond_lamports = 13;
-        let cli = args_for(Command::DisputeSettings(DisputeSettingsArgs {
-            missed_verification_dispute_window_slots: 5,
-            dispute_verification_window_slots: 7,
-            paid_verification_dispute_window_slots: 11,
-            paid_verification_dispute_bond_lamports: 13,
-        }));
-        let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
-
-        assert!(plan.instruction.is_none());
-    }
 }

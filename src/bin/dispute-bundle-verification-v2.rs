@@ -41,13 +41,6 @@ enum DisputeKindArg {
     PaidVerdictDispute,
 }
 
-fn dispute_kind_from_arg(kind: DisputeKindArg) -> BundleVerificationDisputeV2Kind {
-    match kind {
-        DisputeKindArg::MissedVerification => BundleVerificationDisputeV2Kind::MissedVerification,
-        DisputeKindArg::PaidVerdictDispute => BundleVerificationDisputeV2Kind::PaidVerdictDispute,
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -65,7 +58,14 @@ async fn main() -> Result<()> {
         dispute_payer_pubkey,
         cli.bundle_escrow,
         bond_refund_recipient,
-        dispute_kind_from_arg(cli.kind),
+        match cli.kind {
+            DisputeKindArg::MissedVerification => {
+                BundleVerificationDisputeV2Kind::MissedVerification
+            }
+            DisputeKindArg::PaidVerdictDispute => {
+                BundleVerificationDisputeV2Kind::PaidVerdictDispute
+            }
+        },
     );
 
     let client = RpcClient::new_with_commitment(cli.cluster_rpc, CommitmentConfig::confirmed());
