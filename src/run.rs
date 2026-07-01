@@ -25,8 +25,24 @@ use tokenizer::ChatMessage;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::oneshot;
 use tracing::{info_span, instrument, Instrument as _};
-use wolf_crypto::buf::Iv;
 use yellowstone_grpc_client::GeyserGrpcClientError;
+
+#[cfg(feature = "crypto")]
+pub use wolf_crypto::buf::Iv;
+
+#[cfg(not(feature = "crypto"))]
+pub struct Iv;
+
+#[cfg(not(feature = "crypto"))]
+impl Iv {
+    pub fn new(_bytes: [u8; 16]) -> Self {
+        Self
+    }
+
+    pub fn copy(&self) -> Self {
+        Self
+    }
+}
 
 pub const TIMEOUT: Duration = Duration::from_secs(1200);
 
@@ -515,11 +531,8 @@ impl ContentDelta {
             )?));
         }
         if let Some(text) = &self.reasoning_content {
-            self.reasoning_content = Some(BASE64_STANDARD.encode(encrypt_with_iv(
-                text.as_bytes(),
-                shared_secret,
-                iv,
-            )?));
+            self.reasoning_content =
+                Some(BASE64_STANDARD.encode(encrypt_with_iv(text.as_bytes(), shared_secret, iv)?));
         }
         Ok(())
     }
@@ -963,6 +976,7 @@ pub fn encrypt(plaintext: &[u8], shared_secret: [u8; 32]) -> Result<(Vec<u8>, [u
 
 /// Encrypts `plaintext` with `shared_secret` using AES-256-CTR and the provided
 /// initialization vector.
+#[cfg(feature = "crypto")]
 #[allow(clippy::result_large_err)]
 pub fn encrypt_with_iv(
     plaintext: &[u8],
@@ -979,6 +993,16 @@ pub fn encrypt_with_iv(
         .map_err(|_| Error::InferenceEncryption)?;
 
     Ok(encrypted)
+}
+
+#[cfg(not(feature = "crypto"))]
+#[allow(clippy::result_large_err)]
+pub fn encrypt_with_iv(
+    _plaintext: &[u8],
+    _shared_secret: [u8; 32],
+    _iv: Iv,
+) -> Result<Vec<u8>, Error> {
+    Err(Error::InferenceEncryption)
 }
 
 #[cfg(test)]
