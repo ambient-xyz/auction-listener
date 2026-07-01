@@ -50,7 +50,6 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug_span, info_span, instrument, Instrument as _, Span};
-use wolf_crypto::buf::Iv;
 use x25519_dalek::{PublicKey, StaticSecret};
 use yellowstone_grpc_client::{GeyserGrpcClient, Interceptor};
 use yellowstone_grpc_proto::geyser::subscribe_request_filter_accounts_filter::Filter;
@@ -78,7 +77,7 @@ use ambient_auction_client::sdk;
 use crate::error::Error::Custom;
 use crate::run::{
     completion, encrypt_with_iv, retry, stream_completion, wait_for_verification, InferenceRequest,
-    InferenceResponse, LifecycleEvent, RunAuction, StreamingResponse, SubmitJobArgs,
+    InferenceResponse, Iv, LifecycleEvent, RunAuction, StreamingResponse, SubmitJobArgs,
 };
 use crate::yellowstone_grpc::{decode_account_info, CloneableGeyserGrpcClient};
 use crate::{error::Error, run};
