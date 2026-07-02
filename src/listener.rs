@@ -472,17 +472,21 @@ impl AuctionClient {
         vote_authority_keypair_path: Option<std::path::PathBuf>,
         yellowstone_grpc_url: String,
     ) -> Result<Self, Error> {
-        let keypair_path = keypair_path.unwrap_or_else(|| {
-            #[allow(deprecated)]
-            std::env::home_dir()
-                .unwrap()
-                .join(".config")
-                .join("solana")
-                .join("id.json")
-        });
+        let keypair_path = match keypair_path {
+            Some(p) => p,
+            None => {
+                #[allow(deprecated)]
+                std::env::home_dir()
+                    .ok_or(Error::Custom("Could not determine home directory; set HOME env var or pass --keypair".into()))?
+                    .join(".config")
+                    .join("solana")
+                    .join("id.json")
+            }
+        };
 
         let keypair = match keypair_path.exists() {
-            true => Keypair::read_from_file(keypair_path).unwrap(),
+            true => Keypair::read_from_file(&keypair_path)
+                .map_err(|e| Error::Custom(format!("Failed to read Solana keypair from {}: {e}", keypair_path.display())))?,
             false => {
                 let keypair = Keypair::new();
                 match keypair.write_to_file(keypair_path.clone()) {
