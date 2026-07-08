@@ -57,6 +57,7 @@ solana-account-decoder-client-types = "=2.3.13"
 solana-client = "=2.3.13"
 solana-sdk = "=2.3.1"
 ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", rev = "4fb42ff01997deb81cfc5fa97d2555739177accc", features = ["serde"] }
+ambient-auction-api-v2 = { package = "ambient-auction-api", git = "https://github.com/ambient-xyz/auction-api", rev = "0ea22d10fe2d41a852a7fc0c533951b1621385ee", features = ["serde"] }
 ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", rev = "c8c3601a7a813930dc42c0929a0fda77cb1875ba" }
 itertools = "0.14"
 tokio = "1.45.0"
@@ -70,10 +71,11 @@ rand = "0.9.0"
 anyhow = "1.0.98"
 sha2 = "0.10.9"
 base64 = "0.22.1"
+bs58 = "0.5.1"
 reqwest-eventsource = "0.6.0"
 reqwest = { version = "0.12.15", default-features = false, features = ["json"] }
 axum = { version = "0.8.4", features = ["macros"] }
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 env_logger = "0.11.8"
 yellowstone-grpc-client = "9.0.0"

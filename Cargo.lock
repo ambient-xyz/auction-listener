@@ -277,6 +277,20 @@ dependencies = [
 [[package]]
 name = "ambient-auction-api"
 version = "0.1.0"
+source = "git+https://github.com/ambient-xyz/auction-api?rev=0ea22d10fe2d41a852a7fc0c533951b1621385ee#0ea22d10fe2d41a852a7fc0c533951b1621385ee"
+dependencies = [
+ "borsh 0.10.4",
+ "bs58",
+ "bytemuck",
+ "five8_const 1.0.0",
+ "num_enum 0.5.11",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ambient-auction-api"
+version = "0.1.0"
 source = "git+https://github.com/ambient-xyz/auction-api?rev=4fb42ff01997deb81cfc5fa97d2555739177accc#4fb42ff01997deb81cfc5fa97d2555739177accc"
 dependencies = [
  "borsh 0.10.4",
@@ -293,7 +307,7 @@ name = "ambient-auction-client"
 version = "0.1.0"
 source = "git+https://github.com/ambient-xyz/auction-client?rev=c8c3601a7a813930dc42c0929a0fda77cb1875ba#c8c3601a7a813930dc42c0929a0fda77cb1875ba"
 dependencies = [
- "ambient-auction-api",
+ "ambient-auction-api 0.1.0 (git+https://github.com/ambient-xyz/auction-api?rev=4fb42ff01997deb81cfc5fa97d2555739177accc)",
  "lz4_flex",
  "solana-sdk",
  "solana-system-interface",
@@ -304,11 +318,13 @@ dependencies = [
 name = "ambient-auction-listener"
 version = "0.2.6"
 dependencies = [
- "ambient-auction-api",
+ "ambient-auction-api 0.1.0 (git+https://github.com/ambient-xyz/auction-api?rev=0ea22d10fe2d41a852a7fc0c533951b1621385ee)",
+ "ambient-auction-api 0.1.0 (git+https://github.com/ambient-xyz/auction-api?rev=4fb42ff01997deb81cfc5fa97d2555739177accc)",
  "ambient-auction-client",
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bs58",
  "bytemuck",
  "clap",
  "env_logger 0.11.10",
