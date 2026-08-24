@@ -56,8 +56,8 @@ num_enum = "0.7.3"
 solana-account-decoder-client-types = "=2.3.13"
 solana-client = "=2.3.13"
 solana-sdk = "=2.3.1"
-ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", rev = "0ea22d10fe2d41a852a7fc0c533951b1621385ee", features = ["serde"] }
-ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", rev = "851e774366a360a6fe8872b404b29f680a671356" }
+ambient-auction-api = { git = "https://github.com/ambient-xyz/auction-api", rev = "be3d1842026f37db437694a249284b2c053d748b", features = ["serde"] }
+ambient-auction-client = { git = "https://github.com/ambient-xyz/auction-client", rev = "9af50e3921ae527ac700250213b5e0373c00d2b5" }
 itertools = "0.14"
 tokio = "1.45.0"
 tokio-stream = "0.1"
@@ -86,7 +86,7 @@ x25519-dalek = { version = "2.0.1", features = [
     "static_secrets",
     "getrandom",
 ] }
-wolf-crypto = "0.1.0-alpha.15"
+wolf-crypto = { version = "0.1.0-alpha.15", optional = true }
 moka = { version = "0.12.10", features = ["future"] }
 sentry = { version = "0.42", features = ["tracing", "logs", "tower"] }
 sentry-tracing = "0.42"
@@ -97,5 +97,6 @@ lz4_flex = "0.11.6"
 papaya = "0.2.3"
 
 [features]
-default =[]
+default = ["crypto"]
+crypto = ["dep:wolf-crypto"]
 global-config = ["ambient-auction-client/global-config"]

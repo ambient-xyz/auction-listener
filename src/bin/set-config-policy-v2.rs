@@ -42,6 +42,8 @@ enum Command {
     VerifierSettings(VerifierSettingsArgs),
     /// Patch max auction credits per update
     MaxAuctionCreditsPerUpdate(MaxAuctionCreditsArgs),
+    /// Patch Small credit mint and enablement
+    SmallCreditSettings(SmallCreditSettingsArgs),
     /// Patch one request tier config, preserving unspecified fields
     TierConfig(TierConfigArgs),
 }
@@ -94,6 +96,24 @@ struct MaxAuctionCreditsArgs {
     /// Maximum auction credits that one update can apply
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     value: u64,
+}
+
+#[derive(ClapArgs, Debug)]
+#[command(group(
+    clap::ArgGroup::new("small-credit-state")
+        .required(true)
+        .args(["enabled", "disabled"])
+))]
+struct SmallCreditSettingsArgs {
+    /// Token-2022 Small credit mint
+    #[arg(long)]
+    mint: Pubkey,
+    /// Enable new Small settlements
+    #[arg(long, conflicts_with = "disabled")]
+    enabled: bool,
+    /// Disable new Small settlements
+    #[arg(long, conflicts_with = "enabled")]
+    disabled: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -394,6 +414,28 @@ fn build_patch_plan(
                 }),
             })
         }
+        Command::SmallCreditSettings(args) => {
+            let enabled = match (args.enabled, args.disabled) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => bail!("pass exactly one of --enabled or --disabled"),
+            };
+            if enabled && args.mint == Pubkey::default() {
+                bail!("enabled Small credit mint must be nonzero");
+            }
+            let before_mint = api_pubkey_to_solana(policy.small_credit_mint());
+            let before_enabled = policy.small_credit_enabled();
+            Ok(PatchPlan {
+                kind: "small-credit-settings",
+                before: format!("enabled={before_enabled} mint={before_mint}"),
+                after: format!("enabled={enabled} mint={}", args.mint),
+                instruction: (before_enabled != enabled || before_mint != args.mint).then(|| {
+                    ambient_auction_client::sdk::set_config_policy_v2_small_credit_settings(
+                        program_id, authority, enabled, args.mint,
+                    )
+                }),
+            })
+        }
         Command::TierConfig(args) => {
             let tier = request_tier_from_arg(args.tier);
             let before = policy.tier_configs[request_tier_config_index(tier)];
@@ -477,6 +519,12 @@ async fn main() -> Result<()> {
 
     if let Some(ix) = patch.instruction {
         send_patch(&client, &authority, ix).await?;
+        let updated_policy = fetch_config_policy(&client, policy_pda).await?;
+        let verification = build_patch_plan(&cli.command, &updated_policy, authority_pubkey)?;
+        if verification.instruction.is_some() {
+            bail!("policy patch was not observed after confirmation");
+        }
+        println!("Verified: {}", verification.before);
     } else {
         println!("No-op: requested value already matches current policy");
     }
@@ -487,6 +535,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ambient_auction_api::{ConfigPolicyV2PatchKind, SetConfigPolicyV2Args};
 
     fn args_for(command: Command) -> Cli {
         Cli {
@@ -608,5 +657,27 @@ mod tests {
         let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
 
         assert!(plan.instruction.is_none());
+    }
+
+    #[test]
+    fn set_config_policy_v2_small_credit_settings_builds_patch() {
+        let policy = ConfigPolicyV2::production_default();
+        let mint = Pubkey::new_unique();
+        let cli = args_for(Command::SmallCreditSettings(SmallCreditSettingsArgs {
+            mint,
+            enabled: true,
+            disabled: false,
+        }));
+        let plan = build_patch_plan(&cli.command, &policy, Pubkey::new_unique()).unwrap();
+
+        assert_eq!(plan.kind, "small-credit-settings");
+        let instruction = plan.instruction.unwrap();
+        let args = SetConfigPolicyV2Args::try_from(&instruction.data[1..]).unwrap();
+        assert_eq!(
+            args.patch_kind,
+            ConfigPolicyV2PatchKind::SMALL_CREDIT_SETTINGS
+        );
+        assert_eq!(args.small_credit_enabled, 1);
+        assert_eq!(args.authority.inner(), mint.to_bytes());
     }
 }
