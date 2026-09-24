@@ -206,18 +206,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_invalid_json_fails() {
+    fn test_parse_message_without_role_fails() {
         let invalid_json = r#"{
             "model": "gpt-4",
             "messages": [
                 {
-                    "role": "user"
+                    "content": "Hello"
                 }
             ]
         }"#;
 
         let result: Result<InferenceArgs, _> = serde_json::from_str(invalid_json);
-        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing field `role`"));
     }
 
     #[test]
