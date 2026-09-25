@@ -60,6 +60,12 @@ Typical local setup:
 
 ---
 
+Configuration support is unconditional. Remove the `global-config` Cargo feature from downstream manifests and build commands.
+The legacy `init-config` CLI builds without a feature flag.
+The current auction program rejects its instruction before account parsing.
+Use the [current program instructions](https://github.com/AmbientCrypto/auction-program#readme) for policy accounts and local validator setup.
+The production program requires `ConfigPolicyV2` at genesis. The development initializer remains a separate program feature.
+
 ## Build and test
 
 ```bash
@@ -289,3 +295,36 @@ Embedding services should expose these metrics via their own metrics endpoint.
 * **Bid filter offset:** `watch_bids` uses a memcmp offset tied to the current `Bid` layout; update it if the layout changes.
 
 ---
+
+Configuration cleanup validation on 2026-09-24 used Linux aarch64 and Rust 1.93.1.
+At source commit `541c5f34368bcb27aa948da763c14dd5a151042b`, locked all-target builds and tests passed with default crypto and `--no-default-features`.
+Each run passed 38 library tests, four policy-fixture tests, and seven helper tests.
+Both initializer `--help` commands passed without a configuration feature flag. These commands submit no transactions.
+
+Run the same build and test selections with:
+
+```sh
+cargo build --locked --offline --all-targets
+cargo test --locked --offline --all-targets
+cargo build --locked --offline --all-targets --no-default-features
+cargo test --locked --offline --all-targets --no-default-features
+```
+
+The Linux container used `CARGO_BUILD_JOBS=1` and `CARGO_PROFILE_DEV_DEBUG=0` to fit available memory.
+The preceding listener #23 baseline reproduced the existing macOS `wolf-crypto-sys` E0080 binding failure.
+Linux validation kept crypto enabled and preserved its dependency versions.
+These tests cover compilation, parsing, and generated policy fixtures. They do not establish live listener operation or deployment equivalence.
+
+Fresh merged-dependency validation on 2026-09-25 used source commit `5dd168946fd94eec554e6fdf70da4547eaadd555`.
+The API pin is `45d2dfc029ccd0fce0f3daa672328e32a5e0e8aa`, and the client pin is `36b48f6d4e16f447e90db2a64c8733c4a2763f59`.
+The manifest and lockfile resolve one API source. All other dependency entries remain unchanged.
+The locked Linux build and test commands above passed with default crypto and `--no-default-features`.
+Each selection passed all 49 tests. Both initializer help commands also passed with default crypto:
+
+```sh
+cargo run --locked --offline --bin init-config -- --help
+cargo run --locked --offline --bin init-config-policy-v2 -- --help
+```
+
+The earlier results remain historical evidence. The Linux toolchain and resource limits remain the same.
+The repin changes no listener behavior and establishes no deployment equivalence.
