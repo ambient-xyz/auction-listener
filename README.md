@@ -314,3 +314,17 @@ The Linux container used `CARGO_BUILD_JOBS=1` and `CARGO_PROFILE_DEV_DEBUG=0` to
 The preceding listener #23 baseline reproduced the existing macOS `wolf-crypto-sys` E0080 binding failure.
 Linux validation kept crypto enabled and preserved its dependency versions.
 These tests cover compilation, parsing, and generated policy fixtures. They do not establish live listener operation or deployment equivalence.
+
+Fresh merged-dependency validation on 2026-09-25 used source commit `5dd168946fd94eec554e6fdf70da4547eaadd555`.
+The API pin is `45d2dfc029ccd0fce0f3daa672328e32a5e0e8aa`, and the client pin is `36b48f6d4e16f447e90db2a64c8733c4a2763f59`.
+The manifest and lockfile resolve one API source. All other dependency entries remain unchanged.
+The locked Linux build and test commands above passed with default crypto and `--no-default-features`.
+Each selection passed all 49 tests. Both initializer help commands also passed with default crypto:
+
+```sh
+cargo run --locked --offline --bin init-config -- --help
+cargo run --locked --offline --bin init-config-policy-v2 -- --help
+```
+
+The earlier results remain historical evidence. The Linux toolchain and resource limits remain the same.
+The repin changes no listener behavior and establishes no deployment equivalence.
